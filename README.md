@@ -17,7 +17,7 @@ An AI-powered SQL agent system that enables natural language database queries us
 - Python 3.8 or higher
 - Groq API key (for LLaMA 3 access)
 
-## 🛠️ Installation
+## Installation
 
 1. **Clone the repository**
 ```bash
@@ -54,7 +54,7 @@ To get a Groq API key:
 - Sign up for a free account
 - Generate an API key
 
-## 📊 Usage
+## Usage
 
 1. **Start the application**
 ```bash
@@ -97,7 +97,7 @@ CrewAI-SQL-Agent/
 └── setup_database.py        # (Optional) Pre-populate database with sample data
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -163,7 +163,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Streamlit](https://streamlit.io/) for the web interface
 - [Groq](https://groq.com/) for LLaMA 3 API access
 
-## 📧 Contact
+## Contact
 
 For questions or support, please open an issue in the GitHub repository.
 
