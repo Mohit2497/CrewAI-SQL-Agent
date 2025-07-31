@@ -1,0 +1,12 @@
+crewai[tools]==0.32.0
+python-dotenv
+sqlite-utils
+pandas
+langchain-groq
+streamlit
+plotly
+altair
+watchdog
+requests
+pandas
+numpy
