@@ -15,6 +15,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import re
 import json
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Import CrewAI components
 from crewai import Agent, Crew, Process, Task
