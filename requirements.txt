@@ -4,12 +4,12 @@ pandas
 python-dotenv
 plotly
 
-# SQLite fix
+# SQLite fix - MUST be first before other dependencies
 pysqlite3-binary
 
-# CrewAI
+# CrewAI and all dependencies
 crewai
-crewai[tools]==0.32.0
+crewai-tools
 langchain
 langchain-community
 langchain-groq
@@ -17,3 +17,14 @@ langchain-groq
 # Vector stores
 chromadb
 embedchain
+
+# OpenTelemetry dependencies for CrewAI
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+
+# Additional required packages
+typing-extensions
+platformdirs
+pkg_resources
+setuptools
