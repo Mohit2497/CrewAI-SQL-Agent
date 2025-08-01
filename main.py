@@ -25,10 +25,11 @@ import re
 import json
 import tempfile
 import concurrent.futures
+from typing import Type
+from pydantic import BaseModel, Field
 
 # Import CrewAI components
 from crewai import Agent, Crew, Process, Task
-from langchain.tools import Tool
 
 # Fixed LangChain imports
 from langchain_community.tools.sql_database.tool import (
@@ -240,102 +241,118 @@ def generate_csv_questions(df, table_name):
 def create_tools(db, db_path):
     """Create tools with given database connection"""
     
-    # Create simple wrapper functions
-    def list_tables_func(query: str = "") -> str:
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            conn.close()
-            
-            if not tables:
-                return "No tables found. Please upload a CSV file first."
-            
-            table_names = [t[0] for t in tables]
-            return f"Available tables: {', '.join(table_names)}"
-        except Exception as e:
-            return f"Error listing tables: {str(e)}"
+    from crewai.tools import BaseTool
+    from typing import Type
+    from pydantic import BaseModel, Field
     
-    def get_table_schema_func(table_name: str) -> str:
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Get column info
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            columns = cursor.fetchall()
-            
-            # Get sample data
-            cursor.execute(f"SELECT * FROM {table_name} LIMIT 3")
-            sample_data = cursor.fetchall()
-            
-            conn.close()
-            
-            schema_info = f"Table: {table_name}\n"
-            schema_info += "Columns:\n"
-            for col in columns:
-                schema_info += f"  - {col[1]} ({col[2]})\n"
-            
-            schema_info += "\nSample data:\n"
-            for row in sample_data:
-                schema_info += f"  {row}\n"
-            
-            return schema_info
-        except Exception as e:
-            return f"Error getting schema: {str(e)}"
+    class ListTablesInput(BaseModel):
+        """Input for listing tables"""
+        dummy: str = Field(default="", description="No input needed")
     
-    def execute_sql_func(sql_query: str) -> str:
-        try:
-            # Clean the query
-            sql_query = sql_query.strip()
-            if sql_query.startswith('"') and sql_query.endswith('"'):
-                sql_query = sql_query[1:-1]
-            
-            conn = sqlite3.connect(db_path)
-            df = pd.read_sql_query(sql_query, conn)
-            conn.close()
-            
-            # Store in session state
-            st.session_state.query_results = {
-                'query': sql_query,
-                'dataframe': df,
-                'text_result': df.to_string(),
-                'timestamp': datetime.now()
-            }
-            
-            # Return string representation
-            if len(df) == 0:
-                return "Query returned no results."
-            elif len(df) == 1 and len(df.columns) == 1:
-                return f"Result: {df.iloc[0, 0]}"
-            elif len(df) > 10:
-                return f"Query returned {len(df)} rows. First 10 rows:\n{df.head(10).to_string()}"
-            else:
-                return df.to_string()
-        except Exception as e:
-            return f"Error executing query: {str(e)}"
+    class ListTablesTool(BaseTool):
+        name: str = "list_tables"
+        description: str = "List all available tables in the database"
+        args_schema: Type[BaseModel] = ListTablesInput
+        
+        def _run(self, dummy: str = "") -> str:
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = cursor.fetchall()
+                conn.close()
+                
+                if not tables:
+                    return "No tables found. Please upload a CSV file first."
+                
+                table_names = [t[0] for t in tables]
+                return f"Available tables: {', '.join(table_names)}"
+            except Exception as e:
+                return f"Error listing tables: {str(e)}"
     
-    # Create tools using Tool class
-    list_tables = Tool(
-        name="list_tables",
-        description="List all available tables in the database",
-        func=list_tables_func
-    )
+    class GetSchemaInput(BaseModel):
+        """Input for getting table schema"""
+        table_name: str = Field(description="Name of the table to get schema for")
     
-    get_schema = Tool(
-        name="get_table_schema",
-        description="Get the schema and sample data for a specific table. Input should be the table name.",
-        func=get_table_schema_func
-    )
+    class GetSchemaTool(BaseTool):
+        name: str = "get_table_schema"
+        description: str = "Get the schema and sample data for a specific table"
+        args_schema: Type[BaseModel] = GetSchemaInput
+        
+        def _run(self, table_name: str) -> str:
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                
+                # Get column info
+                cursor.execute(f"PRAGMA table_info({table_name})")
+                columns = cursor.fetchall()
+                
+                # Get sample data
+                cursor.execute(f"SELECT * FROM {table_name} LIMIT 3")
+                sample_data = cursor.fetchall()
+                
+                conn.close()
+                
+                schema_info = f"Table: {table_name}\n"
+                schema_info += "Columns:\n"
+                for col in columns:
+                    schema_info += f"  - {col[1]} ({col[2]})\n"
+                
+                schema_info += "\nSample data:\n"
+                for row in sample_data:
+                    schema_info += f"  {row}\n"
+                
+                return schema_info
+            except Exception as e:
+                return f"Error getting schema: {str(e)}"
     
-    execute_sql = Tool(
-        name="execute_sql",
-        description="Execute a SQL query and return results. Input should be a valid SQL query string.",
-        func=execute_sql_func
-    )
+    class ExecuteSQLInput(BaseModel):
+        """Input for executing SQL"""
+        sql_query: str = Field(description="SQL query to execute")
     
-    return [list_tables, get_schema, execute_sql]
+    class ExecuteSQLTool(BaseTool):
+        name: str = "execute_sql"
+        description: str = "Execute a SQL query and return results"
+        args_schema: Type[BaseModel] = ExecuteSQLInput
+        
+        def _run(self, sql_query: str) -> str:
+            try:
+                # Clean the query
+                sql_query = sql_query.strip()
+                if sql_query.startswith('"') and sql_query.endswith('"'):
+                    sql_query = sql_query[1:-1]
+                
+                conn = sqlite3.connect(db_path)
+                df = pd.read_sql_query(sql_query, conn)
+                conn.close()
+                
+                # Store in session state
+                st.session_state.query_results = {
+                    'query': sql_query,
+                    'dataframe': df,
+                    'text_result': df.to_string(),
+                    'timestamp': datetime.now()
+                }
+                
+                # Return string representation
+                if len(df) == 0:
+                    return "Query returned no results."
+                elif len(df) == 1 and len(df.columns) == 1:
+                    return f"Result: {df.iloc[0, 0]}"
+                elif len(df) > 10:
+                    return f"Query returned {len(df)} rows. First 10 rows:\n{df.head(10).to_string()}"
+                else:
+                    return df.to_string()
+            except Exception as e:
+                return f"Error executing query: {str(e)}"
+    
+    # Create tool instances
+    list_tables_tool = ListTablesTool()
+    get_schema_tool = GetSchemaTool()
+    execute_sql_tool = ExecuteSQLTool()
+    
+    return [list_tables_tool, get_schema_tool, execute_sql_tool]
 
 # Create agents function
 def create_agents(tools, llm):

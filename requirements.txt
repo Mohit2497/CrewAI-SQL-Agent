@@ -12,3 +12,4 @@ langchain-groq
 sqlite-utils
 numpy
 requests
+pydantic
