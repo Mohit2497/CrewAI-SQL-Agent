@@ -343,7 +343,8 @@ def create_agents(tools, llm):
         verbose=True,
         allow_delegation=False,
         tools=tools,
-        llm=llm
+        llm=llm,
+        max_iter=3
     )
 
     data_analyst = Agent(
@@ -353,7 +354,9 @@ def create_agents(tools, llm):
         and insights in user-uploaded data.""",
         verbose=True,
         allow_delegation=False,
-        llm=llm
+        tools=tools,
+        llm=llm,
+        max_iter=3
     )
 
     business_consultant = Agent(
@@ -363,7 +366,9 @@ def create_agents(tools, llm):
         data-driven decisions based on their uploaded data.""",
         verbose=True,
         allow_delegation=False,
-        llm=llm
+        tools=tools,
+        llm=llm,
+        max_iter=3
     )
     
     return [sql_specialist, data_analyst, business_consultant]
@@ -1090,7 +1095,9 @@ def run_analysis(question, agents):
             agents=[sql_specialist, data_analyst, business_consultant],
             tasks=[data_extraction, data_analysis, business_report],
             process=Process.sequential,
-            verbose=0
+            verbose=0,
+            memory=False
+            max_iter=5
         )
         
         result = crew.kickoff()
