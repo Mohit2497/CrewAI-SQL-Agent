@@ -245,6 +245,9 @@ def create_tools(db, db_path):
     from typing import Type
     from pydantic import BaseModel, Field
     
+    # Get the database path from the current session
+    current_db_path = db_path
+    
     class ListTablesInput(BaseModel):
         """Input for listing tables"""
         dummy: str = Field(default="", description="No input needed")
@@ -256,7 +259,7 @@ def create_tools(db, db_path):
         
         def _run(self, dummy: str = "") -> str:
             try:
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(current_db_path)
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 tables = cursor.fetchall()
@@ -266,7 +269,13 @@ def create_tools(db, db_path):
                     return "No tables found. Please upload a CSV file first."
                 
                 table_names = [t[0] for t in tables]
-                return f"Available tables: {', '.join(table_names)}"
+                result = f"Available tables: {', '.join(table_names)}"
+                
+                # Add uploaded tables info if available
+                if 'uploaded_tables' in st.session_state and st.session_state.uploaded_tables:
+                    result += f"\n\nUploaded tables in this session: {', '.join(st.session_state.uploaded_tables)}"
+                
+                return result
             except Exception as e:
                 return f"Error listing tables: {str(e)}"
     
@@ -281,7 +290,7 @@ def create_tools(db, db_path):
         
         def _run(self, table_name: str) -> str:
             try:
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(current_db_path)
                 cursor = conn.cursor()
                 
                 # Get column info
@@ -323,17 +332,18 @@ def create_tools(db, db_path):
                 if sql_query.startswith('"') and sql_query.endswith('"'):
                     sql_query = sql_query[1:-1]
                 
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(current_db_path)
                 df = pd.read_sql_query(sql_query, conn)
                 conn.close()
                 
-                # Store in session state
-                st.session_state.query_results = {
-                    'query': sql_query,
-                    'dataframe': df,
-                    'text_result': df.to_string(),
-                    'timestamp': datetime.now()
-                }
+                # Store in session state if available
+                if 'query_results' in st.session_state:
+                    st.session_state.query_results = {
+                        'query': sql_query,
+                        'dataframe': df,
+                        'text_result': df.to_string(),
+                        'timestamp': datetime.now()
+                    }
                 
                 # Return string representation
                 if len(df) == 0:
@@ -978,10 +988,15 @@ def extract_sql_queries(text):
 
 def run_analysis(question, agents):
     """Run analysis with provided agents"""
-    st.session_state.executed_queries = []
+    # Initialize if not exists
+    if 'executed_queries' not in st.session_state:
+        st.session_state.executed_queries = []
     
     try:
         sql_specialist, data_analyst, business_consultant = agents
+        
+        # Get available tables safely
+        available_tables = st.session_state.get('uploaded_tables', [])
         
         # Create tasks
         data_extraction = Task(
@@ -991,7 +1006,7 @@ def run_analysis(question, agents):
             IMPORTANT: 
             1. First list ALL available tables to see what's in the database
             2. The data comes from CSV files uploaded by the user
-            3. Available tables: {', '.join(st.session_state.uploaded_tables)}
+            3. Available tables: {', '.join(available_tables) if available_tables else 'Use list_tables tool to find tables'}
             4. Make sure to query the correct table that contains the data for this question
             5. Show the exact SQL query you're executing
             """,
