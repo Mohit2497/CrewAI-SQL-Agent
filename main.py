@@ -1,3 +1,10 @@
+# streamlit_app_clean.py
+"""
+Clean Streamlit interface for SQL Agent System
+Works exclusively with uploaded CSV files
+"""
+
+# CRITICAL: SQLite fix for Streamlit Cloud - MUST be at the very top
 try:
     __import__('pysqlite3')
     import sys
@@ -17,10 +24,11 @@ import plotly.graph_objects as go
 import re
 import json
 import tempfile
+import concurrent.futures
 
 # Import CrewAI components
 from crewai import Agent, Crew, Process, Task
-from crewai.tools import tool
+from langchain.tools import Tool
 
 # Fixed LangChain imports
 from langchain_community.tools.sql_database.tool import (
@@ -38,7 +46,7 @@ load_dotenv()
 # Page configuration
 st.set_page_config(
     page_title="CrewAI SQL Agent",
-    page_icon="",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -232,103 +240,102 @@ def generate_csv_questions(df, table_name):
 def create_tools(db, db_path):
     """Create tools with given database connection"""
     
-    @tool("list_tables")
-    def list_tables() -> str:
-        """List all available tables in the database"""
+    # Create simple wrapper functions
+    def list_tables_func(query: str = "") -> str:
         try:
-            tool = ListSQLDatabaseTool(db=db)
-            result = tool.invoke("")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = cursor.fetchall()
+            conn.close()
             
-            if not result or "No tables" in result:
+            if not tables:
                 return "No tables found. Please upload a CSV file first."
             
-            if st.session_state.uploaded_tables:
-                result += f"\n\nUploaded tables in this session: {', '.join(st.session_state.uploaded_tables)}"
-            
-            return result
+            table_names = [t[0] for t in tables]
+            return f"Available tables: {', '.join(table_names)}"
         except Exception as e:
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                tables = cursor.fetchall()
-                conn.close()
-                
-                if not tables:
-                    return "No tables found. Please upload a CSV file first."
-                
-                table_names = [t[0] for t in tables]
-                result = f"Available tables: {', '.join(table_names)}"
-                
-                if st.session_state.uploaded_tables:
-                    result += f"\n\nUploaded in this session: {', '.join(st.session_state.uploaded_tables)}"
-                
-                return result
-            except Exception as e2:
-                return f"Error listing tables: {str(e2)}"
-
-    @tool("tables_schema")
-    def tables_schema(tables: str) -> str:
-        """Get schema and sample data for specified tables"""
+            return f"Error listing tables: {str(e)}"
+    
+    def get_table_schema_func(table_name: str) -> str:
         try:
-            tool = InfoSQLDatabaseTool(db=db)
-            return tool.invoke(tables)
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Get column info
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = cursor.fetchall()
+            
+            # Get sample data
+            cursor.execute(f"SELECT * FROM {table_name} LIMIT 3")
+            sample_data = cursor.fetchall()
+            
+            conn.close()
+            
+            schema_info = f"Table: {table_name}\n"
+            schema_info += "Columns:\n"
+            for col in columns:
+                schema_info += f"  - {col[1]} ({col[2]})\n"
+            
+            schema_info += "\nSample data:\n"
+            for row in sample_data:
+                schema_info += f"  {row}\n"
+            
+            return schema_info
         except Exception as e:
             return f"Error getting schema: {str(e)}"
-
-    @tool("execute_sql")
-    def execute_sql(sql_query: str) -> str:
-        """Execute a SQL query and return results"""
-        sql_query = sql_query.strip()
-        if sql_query.startswith('"') and sql_query.endswith('"'):
-            sql_query = sql_query[1:-1]
-        
+    
+    def execute_sql_func(sql_query: str) -> str:
         try:
-            if 'executed_queries' not in st.session_state:
-                st.session_state.executed_queries = []
-            st.session_state.executed_queries.append(sql_query)
+            # Clean the query
+            sql_query = sql_query.strip()
+            if sql_query.startswith('"') and sql_query.endswith('"'):
+                sql_query = sql_query[1:-1]
             
-            tool = QuerySQLDataBaseTool(db=db)
-            result = tool.invoke(sql_query)
+            conn = sqlite3.connect(db_path)
+            df = pd.read_sql_query(sql_query, conn)
+            conn.close()
             
-            # Also get as dataframe
-            try:
-                conn = sqlite3.connect(db_path)
-                df = pd.read_sql_query(sql_query, conn)
-                conn.close()
-                
-                st.session_state.query_results = {
-                    'query': sql_query,
-                    'dataframe': df,
-                    'text_result': result,
-                    'timestamp': datetime.now()
-                }
-            except:
-                st.session_state.query_results = {
-                    'query': sql_query,
-                    'dataframe': None,
-                    'text_result': result,
-                    'timestamp': datetime.now()
-                }
+            # Store in session state
+            st.session_state.query_results = {
+                'query': sql_query,
+                'dataframe': df,
+                'text_result': df.to_string(),
+                'timestamp': datetime.now()
+            }
             
-            return result
+            # Return string representation
+            if len(df) == 0:
+                return "Query returned no results."
+            elif len(df) == 1 and len(df.columns) == 1:
+                return f"Result: {df.iloc[0, 0]}"
+            elif len(df) > 10:
+                return f"Query returned {len(df)} rows. First 10 rows:\n{df.head(10).to_string()}"
+            else:
+                return df.to_string()
         except Exception as e:
             return f"Error executing query: {str(e)}"
-
-    @tool("check_sql")
-    def check_sql(sql_query: str) -> str:
-        """Validate SQL query before execution"""
-        try:
-            llm = st.session_state.get('llm', None)
-            if llm:
-                tool = QuerySQLCheckerTool(db=db, llm=llm)
-                return tool.invoke({"query": sql_query})
-            else:
-                return "Query validation passed"
-        except:
-            return "Query validation passed"
     
-    return [list_tables, tables_schema, execute_sql, check_sql]
+    # Create tools using Tool class
+    list_tables = Tool(
+        name="list_tables",
+        description="List all available tables in the database",
+        func=list_tables_func
+    )
+    
+    get_schema = Tool(
+        name="get_table_schema",
+        description="Get the schema and sample data for a specific table. Input should be the table name.",
+        func=get_table_schema_func
+    )
+    
+    execute_sql = Tool(
+        name="execute_sql",
+        description="Execute a SQL query and return results. Input should be a valid SQL query string.",
+        func=execute_sql_func
+    )
+    
+    return [list_tables, get_schema, execute_sql]
 
 # Create agents function
 def create_agents(tools, llm):
@@ -338,37 +345,35 @@ def create_agents(tools, llm):
         role="Senior Database Administrator",
         goal="Extract accurate data from uploaded CSV files using optimized SQL queries",
         backstory="""You are a database expert working with user-uploaded CSV data. 
-        Always check what tables are available first. Remember that all data comes from 
-        CSV files uploaded by the user.""",
+        Always check what tables are available first, then get the schema, then write SQL queries.
+        Be precise with your SQL syntax.""",
         verbose=True,
         allow_delegation=False,
         tools=tools,
         llm=llm,
-        max_iter=3
+        max_iter=3  # Limit iterations
     )
 
     data_analyst = Agent(
         role="Senior Data Analyst",
         goal="Analyze query results and extract meaningful insights from CSV data",
         backstory="""You are a data analysis expert who specializes in finding patterns 
-        and insights in user-uploaded data.""",
+        and insights in user-uploaded data. Provide clear, concise analysis.""",
         verbose=True,
         allow_delegation=False,
-        tools=tools,
         llm=llm,
-        max_iter=3
+        max_iter=3  # Limit iterations
     )
 
     business_consultant = Agent(
         role="Business Strategy Consultant",
         goal="Transform data insights into actionable business recommendations",
         backstory="""You are a senior business consultant who helps users make 
-        data-driven decisions based on their uploaded data.""",
+        data-driven decisions based on their uploaded data. Keep recommendations practical.""",
         verbose=True,
         allow_delegation=False,
-        tools=tools,
         llm=llm,
-        max_iter=3
+        max_iter=3  # Limit iterations
     )
     
     return [sql_specialist, data_analyst, business_consultant]
@@ -391,7 +396,7 @@ def main():
     
     # Check LLM initialization
     if llm is None:
-        st.error("Failed to initialize LLM. Please check your GROQ_API_KEY in .env file")
+        st.error("Failed to initialize LLM. Please check your GROQ_API_KEY")
         st.stop()
         return
     
@@ -460,7 +465,7 @@ def main():
                         st.metric("Missing Values", f"{null_count:,}")
                 
                 # Create tabs for different views
-                preview_tab1, preview_tab2 = st.tabs(["Sample Data", "Data Types"])
+                preview_tab1, preview_tab2 = st.tabs(["Sample Data", "Column Details"])
                 
                 with preview_tab1:
                     st.markdown("#### First 10 Rows")
@@ -522,38 +527,6 @@ def main():
                             use_container_width=True,
                             hide_index=True
                         )
-                
-                # with preview_tab3:
-                #     st.markdown("#### Data Type Summary")
-                    
-                #     # Create a more visual representation of data types
-                #     col_types = df.dtypes.value_counts()
-                    
-                #     # Create two columns for the display
-                #     dt_col1, dt_col2 = st.columns([1, 2])
-                    
-                #     with dt_col1:
-                #         type_df = pd.DataFrame({
-                #             'Data Type': col_types.index.astype(str),
-                #             'Count': col_types.values,
-                #             'Percentage': (col_types.values / len(df.columns) * 100).round(1)
-                #         })
-                        
-                #         for _, row in type_df.iterrows():
-                #             st.metric(
-                #                 label=row['Data Type'],
-                #                 value=row['Count'],
-                #                 delta=f"{row['Percentage']}% of columns"
-                #             )
-                    
-                #     with dt_col2:
-                #         # Show which columns belong to each type
-                #         st.markdown("##### Columns by Type")
-                #         for dtype in col_types.index:
-                #             dtype_cols = df.select_dtypes(include=[dtype]).columns.tolist()
-                #             with st.expander(f"{dtype} columns ({len(dtype_cols)})"):
-                #                 for col in dtype_cols:
-                #                     st.write(f"• {col}")
                 
                 # Load to database section
                 st.markdown("### Load to Database")
@@ -649,107 +622,51 @@ def main():
             if analyze_button:
                 if question:
                     with st.spinner("Running analysis..."):
-                        # Get fresh database connection
-                        db, db_path = get_database_connection()
-                        
-                        if db and db_path:
-                            # Create tools and agents
-                            tools = create_tools(db, db_path)
-                            agents = create_agents(tools, llm)
+                        try:
+                            # Get fresh database connection
+                            db, db_path = get_database_connection()
                             
-                            # Progress tracking
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            
-                            stages = [
-                                (0.2, "Connecting to database..."),
-                                (0.4, "Analyzing tables..."),
-                                (0.6, "Writing SQL queries..."),
-                                (0.8, "Analyzing results..."),
-                                (0.9, "Generating report...")
-                            ]
-                            
-                            for progress, status in stages:
-                                progress_bar.progress(progress)
-                                status_text.text(status)
-                                time.sleep(0.5)
-                            
-                            # Run analysis
-                            result = run_analysis(question, agents)
-                            
-                            progress_bar.progress(1.0)
-                            status_text.text("Analysis complete!")
-                            time.sleep(0.5)
-                            
-                            progress_bar.empty()
-                            status_text.empty()
-                            
-                            st.session_state.current_analysis = result
-                            st.session_state.analysis_history.append(result)
-                            
-                            if 'selected_question' in st.session_state:
-                                del st.session_state.selected_question
-                        else:
-                            st.error("Failed to connect to database")
+                            if db and db_path:
+                                # Create tools and agents
+                                tools = create_tools(db, db_path)
+                                agents = create_agents(tools, llm)
+                                
+                                # Show progress
+                                progress_text = st.empty()
+                                progress_text.text("Starting analysis...")
+                                
+                                # Run analysis with timeout
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = executor.submit(run_analysis, question, agents)
+                                    try:
+                                        result = future.result(timeout=60)  # 60 second timeout
+                                    except concurrent.futures.TimeoutError:
+                                        st.error("Analysis timed out after 60 seconds. Please try a simpler question.")
+                                        result = {
+                                            "success": False,
+                                            "error": "Timeout",
+                                            "question": question,
+                                            "timestamp": datetime.now()
+                                        }
+                                
+                                progress_text.empty()
+                                
+                                if result.get('success'):
+                                    st.session_state.current_analysis = result
+                                    st.session_state.analysis_history.append(result)
+                                    st.success("Analysis completed successfully!")
+                                else:
+                                    st.error(f"Analysis failed: {result.get('error', 'Unknown error')}")
+                                
+                                if 'selected_question' in st.session_state:
+                                    del st.session_state.selected_question
+                            else:
+                                st.error("Failed to connect to database")
+                        except Exception as e:
+                            st.error(f"Error during analysis: {str(e)}")
+                            st.exception(e)
                 else:
                     st.warning("Please enter a question to analyze.")
-        
-        # with col2:
-        #     st.header("Data Overview")
-            
-        #     # Check if there's a recently uploaded CSV
-        #     if st.session_state.csv_preview_data:
-        #         table_name = st.session_state.csv_preview_data['table_name']
-        #         df = st.session_state.csv_preview_data['dataframe']
-                
-        #         st.info(f"Current table: **{table_name}**")
-                
-        #         # Show table stats
-        #         col1, col2 = st.columns(2)
-        #         with col1:
-        #             st.metric("Rows", f"{len(df):,}")
-        #         with col2:
-        #             st.metric("Columns", len(df.columns))
-                
-        #         # Show column information
-        #         st.markdown("#### Column Information")
-                
-        #         # Create column info dataframe
-        #         col_info = pd.DataFrame({
-        #             'Column': df.columns,
-        #             'Type': df.dtypes.astype(str),
-        #             'Non-Null': df.count(),
-        #             'Null': df.isnull().sum(),
-        #             'Unique': df.nunique()
-        #         })
-                
-        #         # Display column info
-        #         st.dataframe(col_info, use_container_width=True, height=200, hide_index=True)
-                
-        #         # Show sample data
-        #         with st.expander("View Sample Data"):
-        #             st.dataframe(df.head(10), use_container_width=True)
-                
-        #         # Quick stats for numeric columns
-        #         numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-        #         if len(numeric_cols) > 0:
-        #             with st.expander("Numeric Column Statistics"):
-        #                 st.dataframe(df[numeric_cols].describe(), use_container_width=True)
-        #     else:
-        #         # Show all tables overview
-        #         stats = get_database_stats(db_path)
-        #         if stats and stats['tables']:
-        #             col1, col2 = st.columns(2)
-        #             with col1:
-        #                 st.metric("Total Tables", stats['total_tables'])
-        #             with col2:
-        #                 st.metric("Total Rows", f"{stats['total_rows']:,}")
-                    
-        #             st.markdown("#### Available Tables")
-        #             for table in stats['tables']:
-        #                 st.success(f"**{table['name']}**: {table['rows']:,} rows")
-        #         else:
-        #             st.info("No tables loaded yet. Upload a CSV file to get started!")
     
     with tab3:
         if st.session_state.current_analysis and st.session_state.current_analysis.get('success', False):
@@ -1090,24 +1007,28 @@ def run_analysis(question, agents):
             agent=business_consultant
         )
         
-        # Create and run crew
+        # Create and run crew with fixes
         crew = Crew(
             agents=[sql_specialist, data_analyst, business_consultant],
             tasks=[data_extraction, data_analysis, business_report],
             process=Process.sequential,
             verbose=0,
-            memory=False,
-            max_iter=5
+            memory=False,  # Disable memory to avoid issues
+            max_iter=5  # Limit total iterations
         )
         
         result = crew.kickoff()
-        queries = extract_sql_queries(result)
+        
+        # Convert result to string if it isn't already
+        result_str = str(result)
+        
+        queries = extract_sql_queries(result_str)
         
         return {
             "success": True,
             "question": question,
             "timestamp": datetime.now(),
-            "result": result,
+            "result": result_str,
             "queries": queries
         }
         

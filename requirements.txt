@@ -5,8 +5,10 @@ plotly
 pysqlite3-binary
 setuptools
 crewai
+crewai-tools
 langchain
 langchain-community
 langchain-groq
 sqlite-utils
 numpy
+requests
