@@ -20,7 +20,7 @@ import tempfile
 
 # Import CrewAI components
 from crewai import Agent, Crew, Process, Task
-from crewai.tools import tool
+from langchain.agents import tool
 
 # Fixed LangChain imports
 from langchain_community.tools.sql_database.tool import (
