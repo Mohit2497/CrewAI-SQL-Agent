@@ -9,7 +9,9 @@ crewai-tools
 langchain
 langchain-community
 langchain-groq
+litellm
 sqlite-utils
 numpy
 requests
 pydantic
+openai

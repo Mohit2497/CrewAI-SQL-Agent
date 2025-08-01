@@ -113,12 +113,18 @@ def initialize_llm():
         if not api_key:
             st.error("Please set GROQ_API_KEY in Streamlit secrets or .env file")
             return None
-            
+        
+        # Set environment variable for litellm
+        os.environ["GROQ_API_KEY"] = api_key
+        
+        # Initialize ChatGroq with correct parameters
         llm = ChatGroq(
-            temperature=0,
+            groq_api_key=api_key,
             model_name="llama3-70b-8192",
-            api_key=api_key
+            temperature=0,
+            max_tokens=4096
         )
+        
         return llm
     except Exception as e:
         st.error(f"Failed to initialize LLM: {str(e)}")
