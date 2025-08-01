@@ -1,20 +1,11 @@
-# Core dependencies
 streamlit
 pandas
 python-dotenv
 plotly
-altair
-watchdog
-numpy
-
-# SQLite fix - MUST be included
 pysqlite3-binary
-
-# CrewAI and related
-crewai[tools]==0.32.0
+crewai
+crewai-tools
 langchain-groq
-
-# Additional required dependencies
 sqlite-utils
-requests
 setuptools
+numpy
