@@ -1,7 +1,9 @@
-# streamlit_app_clean.py
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
 
 import streamlit as st
 import pandas as pd
@@ -91,8 +93,16 @@ if 'temp_db_path' not in st.session_state:
 def initialize_llm():
     """Initialize the language model"""
     try:
-        api_key = os.getenv("GROQ_API_KEY")
+        # Try Streamlit secrets first (for deployment)
+        api_key = None
+        try:
+            api_key = st.secrets.get("GROQ_API_KEY")
+        except:
+            # Fall back to environment variable (for local development)
+            api_key = os.getenv("GROQ_API_KEY")
+        
         if not api_key:
+            st.error("Please set GROQ_API_KEY in Streamlit secrets or .env file")
             return None
             
         llm = ChatGroq(
