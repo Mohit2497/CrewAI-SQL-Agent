@@ -1096,7 +1096,7 @@ def run_analysis(question, agents):
             tasks=[data_extraction, data_analysis, business_report],
             process=Process.sequential,
             verbose=0,
-            memory=False
+            memory=False,
             max_iter=5
         )
         
