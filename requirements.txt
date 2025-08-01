@@ -1,12 +1,19 @@
-crewai[tools]==0.32.0
-python-dotenv
-sqlite-utils
-pandas
-langchain-groq
+# Core
 streamlit
-plotly
-altair
-watchdog
-requests
 pandas
-numpy
+python-dotenv
+plotly
+
+# SQLite fix
+pysqlite3-binary
+
+# CrewAI
+crewai
+crewai[tools]==0.32.0
+langchain
+langchain-community
+langchain-groq
+
+# Vector stores
+chromadb
+embedchain

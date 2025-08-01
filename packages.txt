@@ -1,0 +1,3 @@
+build-essential
+libsqlite3-dev
+sqlite3
