@@ -9,3 +9,5 @@ watchdog
 requests
 numpy
 pysqlite3-binary
+openpyxl
+xlrd

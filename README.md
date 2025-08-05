@@ -1,3 +1,15 @@
+---
+title: CrewAI SQL Agent
+emoji: 📊
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+sdk_version: 1.47.1
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # CrewAI SQL Agent
 
 An AI-powered SQL agent system that enables natural language database queries using CrewAI, LangChain, and Streamlit. Upload CSV files and ask questions in plain English to get SQL queries, data analysis, and business insights.
