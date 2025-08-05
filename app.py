@@ -68,6 +68,13 @@ st.markdown("""
         padding: 20px !important;
         background-color: #f0f8ff !important;
     }
+    .complex-query-box {
+        background-color: #f8f9fa;
+        border-left: 4px solid #1f77b4;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0.25rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,6 +98,166 @@ if 'temp_db_path' not in st.session_state:
     temp_file = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
     st.session_state.temp_db_path = temp_file.name
     temp_file.close()
+
+# SQL Query Builder Helpers
+class AdvancedQueryBuilder:
+    """Helper class for building complex SQL queries"""
+    
+    @staticmethod
+    def detect_join_columns(df1, df2, table1_name, table2_name):
+        """Detect potential join columns between two dataframes"""
+        join_suggestions = []
+        
+        # Check for exact column name matches
+        common_columns = set(df1.columns) & set(df2.columns)
+        for col in common_columns:
+            if col.lower().endswith('_id') or col.lower() == 'id':
+                join_suggestions.append({
+                    'confidence': 'high',
+                    'column1': col,
+                    'column2': col,
+                    'suggested_query': f"JOIN {table2_name} ON {table1_name}.{col} = {table2_name}.{col}"
+                })
+        
+        # Check for foreign key patterns
+        for col1 in df1.columns:
+            if col1.lower().endswith('_id'):
+                base_name = col1[:-3]  # Remove '_id'
+                if 'id' in df2.columns:
+                    join_suggestions.append({
+                        'confidence': 'medium',
+                        'column1': col1,
+                        'column2': 'id',
+                        'suggested_query': f"JOIN {table2_name} ON {table1_name}.{col1} = {table2_name}.id"
+                    })
+        
+        return join_suggestions
+    
+    @staticmethod
+    def build_window_function(func_type, column, partition_by=None, order_by=None, window_frame=None):
+        """Build window function syntax"""
+        base_func = f"{func_type}({column})"
+        over_clause_parts = []
+        
+        if partition_by:
+            over_clause_parts.append(f"PARTITION BY {partition_by}")
+        if order_by:
+            over_clause_parts.append(f"ORDER BY {order_by}")
+        if window_frame:
+            over_clause_parts.append(window_frame)
+        
+        if over_clause_parts:
+            return f"{base_func} OVER ({' '.join(over_clause_parts)})"
+        else:
+            return f"{base_func} OVER ()"
+    
+    @staticmethod
+    def build_cte(cte_name, query):
+        """Build Common Table Expression"""
+        return f"WITH {cte_name} AS (\n  {query}\n)"
+
+# Complex Query Examples
+COMPLEX_QUERY_EXAMPLES = {
+    "running_total": """-- Running total example
+SELECT 
+    date,
+    amount,
+    SUM(amount) OVER (ORDER BY date) as running_total
+FROM sales
+ORDER BY date;""",
+    
+    "ranking": """-- Rank within groups
+SELECT 
+    category,
+    product_name,
+    sales_amount,
+    RANK() OVER (PARTITION BY category ORDER BY sales_amount DESC) as rank_in_category
+FROM products
+ORDER BY category, rank_in_category;""",
+    
+    "moving_average": """-- 7-day moving average
+SELECT 
+    date,
+    daily_sales,
+    AVG(daily_sales) OVER (
+        ORDER BY date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) as moving_avg_7_days
+FROM daily_metrics;""",
+    
+    "year_over_year": """-- Year-over-year comparison using CTEs
+WITH current_year AS (
+    SELECT 
+        STRFTIME('%m', date) as month,
+        SUM(amount) as cy_sales
+    FROM sales
+    WHERE STRFTIME('%Y', date) = '2024'
+    GROUP BY month
+),
+previous_year AS (
+    SELECT 
+        STRFTIME('%m', date) as month,
+        SUM(amount) as py_sales
+    FROM sales
+    WHERE STRFTIME('%Y', date) = '2023'
+    GROUP BY month
+)
+SELECT 
+    cy.month,
+    cy.cy_sales,
+    py.py_sales,
+    ROUND((cy.cy_sales - py.py_sales) * 100.0 / py.py_sales, 2) as yoy_growth_pct
+FROM current_year cy
+LEFT JOIN previous_year py ON cy.month = py.month
+ORDER BY cy.month;""",
+    
+    "top_n_per_group": """-- Top 3 products per category
+WITH ranked_products AS (
+    SELECT 
+        category,
+        product_name,
+        total_sales,
+        ROW_NUMBER() OVER (PARTITION BY category ORDER BY total_sales DESC) as rn
+    FROM product_sales
+)
+SELECT 
+    category,
+    product_name,
+    total_sales
+FROM ranked_products
+WHERE rn <= 3
+ORDER BY category, rn;""",
+    
+    "multi_table_analysis": """-- Complex multi-table analysis with CTEs
+WITH customer_metrics AS (
+    SELECT 
+        c.customer_id,
+        c.customer_name,
+        c.region,
+        COUNT(DISTINCT o.order_id) as order_count,
+        SUM(o.total_amount) as total_spent
+    FROM customers c
+    LEFT JOIN orders o ON c.customer_id = o.customer_id
+    GROUP BY c.customer_id, c.customer_name, c.region
+),
+regional_averages AS (
+    SELECT 
+        region,
+        AVG(total_spent) as avg_regional_spent
+    FROM customer_metrics
+    GROUP BY region
+)
+SELECT 
+    cm.customer_name,
+    cm.region,
+    cm.order_count,
+    cm.total_spent,
+    ra.avg_regional_spent,
+    ROUND(cm.total_spent - ra.avg_regional_spent, 2) as diff_from_regional_avg
+FROM customer_metrics cm
+JOIN regional_averages ra ON cm.region = ra.region
+ORDER BY cm.total_spent DESC;"""
+}
 
 # Initialize LLM (cached)
 @st.cache_resource
@@ -441,8 +608,66 @@ def load_csv_to_database(df, table_name, db_path):
         st.error(f"Error loading data to database: {str(e)}")
         return None
 
+def get_table_info(db_path):
+    """Get detailed information about all tables for generating smart questions"""
+    tables_info = {}
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get all tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        
+        for table in tables:
+            table_name = table[0]
+            
+            # Get column info
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = cursor.fetchall()
+            
+            # Get sample data to determine column types
+            cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
+            sample_data = cursor.fetchall()
+            
+            if sample_data:
+                df_sample = pd.DataFrame(sample_data, columns=[col[1] for col in columns])
+                
+                # Categorize columns
+                numeric_cols = []
+                text_cols = []
+                date_cols = []
+                
+                for col in df_sample.columns:
+                    # Try to convert to numeric
+                    try:
+                        pd.to_numeric(df_sample[col])
+                        numeric_cols.append(col)
+                    except:
+                        # Try to convert to datetime
+                        try:
+                            pd.to_datetime(df_sample[col])
+                            date_cols.append(col)
+                        except:
+                            text_cols.append(col)
+                
+                tables_info[table_name] = {
+                    'columns': [col[1] for col in columns],
+                    'numeric_columns': numeric_cols,
+                    'text_columns': text_cols,
+                    'date_columns': date_cols,
+                    'row_count': len(sample_data)
+                }
+        
+        conn.close()
+        return tables_info
+        
+    except Exception as e:
+        return {}
+
 def generate_csv_questions(df, table_name):
-    """Generate relevant questions based on CSV data"""
+    """Generate relevant questions based on CSV data including advanced SQL operations"""
     questions = []
     
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
@@ -453,26 +678,103 @@ def generate_csv_questions(df, table_name):
     questions.append(f"Show me all data from {table_name}")
     questions.append(f"How many records are in {table_name}?")
     
+    # Window function questions
     if numeric_cols:
         col = numeric_cols[0]
-        questions.append(f"What is the average {col} in {table_name}?")
-        questions.append(f"What are the minimum and maximum values of {col} in {table_name}?")
-        if len(numeric_cols) > 1:
-            questions.append(f"Show me the correlation between {numeric_cols[0]} and {numeric_cols[1]}")
+        questions.append(f"Show running total of {col} in {table_name}")
+        questions.append(f"Calculate 7-day moving average of {col}")
         
-    if text_cols:
-        col = text_cols[0]
-        questions.append(f"What are the unique values of {col} in {table_name}?")
-        questions.append(f"What is the most common {col} in {table_name}?")
-        
-    if text_cols and numeric_cols:
-        questions.append(f"What is the average {numeric_cols[0]} by {text_cols[0]} in {table_name}?")
-        questions.append(f"Show me the top 10 {text_cols[0]} by {numeric_cols[0]} from {table_name}")
+        if text_cols:
+            questions.append(f"Rank records by {col} within each {text_cols[0]}")
+            questions.append(f"Show top 3 {text_cols[0]} by {col} using window functions")
     
+    # Advanced aggregation questions
+    if text_cols and numeric_cols:
+        questions.append(f"Show {numeric_cols[0]} by {text_cols[0]} with subtotals and grand total")
+        questions.append(f"Calculate percentage of total {numeric_cols[0]} for each {text_cols[0]}")
+    
+    # Date-based advanced questions
     if date_cols and numeric_cols:
-        questions.append(f"Show me the trend of {numeric_cols[0]} over {date_cols[0]}")
+        questions.append(f"Compare {numeric_cols[0]} month-over-month from {table_name}")
+        questions.append(f"Show year-to-date cumulative {numeric_cols[0]}")
+    
+    # CTE questions
+    if len(numeric_cols) > 1:
+        questions.append(f"Identify outliers and analyze their characteristics in {table_name}")
+    
+    # Multi-table questions (if other tables exist)
+    if st.session_state.uploaded_tables and len(st.session_state.uploaded_tables) > 1:
+        other_tables = [t for t in st.session_state.uploaded_tables if t != table_name]
+        questions.append(f"Join {table_name} with {other_tables[0]} to show combined insights")
     
     return questions
+
+def create_advanced_sql_agent_instructions():
+    """Create instructions for SQL agents to handle advanced queries"""
+    return """
+    You are an expert SQL developer who specializes in complex queries. You can handle:
+    
+    1. **JOIN Operations**:
+       - INNER JOIN: When user wants matching records from both tables
+       - LEFT JOIN: When user wants all records from first table
+       - FULL OUTER JOIN: When user wants all records from both tables
+       - Self JOIN: When comparing records within same table
+       - Multiple JOINs: Connect 3 or more tables
+    
+    2. **Window Functions**:
+       - ROW_NUMBER(): For ranking without ties
+       - RANK(): For ranking with ties
+       - DENSE_RANK(): For ranking with consecutive ranks
+       - Running totals: SUM() OVER (ORDER BY ...)
+       - Moving averages: AVG() OVER (ROWS BETWEEN n PRECEDING AND CURRENT ROW)
+       - LAG/LEAD: Access previous/next row values
+       - PERCENT_RANK(): Calculate percentile ranking
+    
+    3. **Advanced Aggregations**:
+       - GROUP BY with ROLLUP: For subtotals and grand totals
+       - GROUP BY with multiple columns: Multi-dimensional analysis
+       - HAVING clause: Filter aggregated results
+       - Conditional aggregation: SUM(CASE WHEN ... THEN ... END)
+       - Statistical functions: STDDEV, VARIANCE
+    
+    4. **Common Table Expressions (CTEs)**:
+       - Simple CTEs: WITH temp_table AS (SELECT ...)
+       - Multiple CTEs: Chain multiple temporary results
+       - Use CTEs to break down complex queries into readable steps
+    
+    When user asks questions like:
+    - "Compare X across Y" → Use window functions
+    - "Show relationship between tables" → Use appropriate JOIN
+    - "Calculate running total" → Use SUM() OVER()
+    - "Show top N per group" → Use ROW_NUMBER() with PARTITION BY
+    - "Multi-step analysis" → Use CTEs
+    
+    Always:
+    - Check available tables first
+    - Verify column names exist
+    - Use appropriate JOIN conditions
+    - Consider performance (use LIMIT for testing)
+    - Explain what the query does
+    """
+
+def monitor_query_complexity(query):
+    """Check if query is complex and might need optimization"""
+    complexity_indicators = {
+        'joins': query.upper().count('JOIN'),
+        'subqueries': query.upper().count('SELECT') - 1,
+        'window_functions': query.upper().count('OVER'),
+        'ctes': query.upper().count('WITH'),
+        'aggregations': sum(query.upper().count(func) for func in ['GROUP BY', 'SUM', 'AVG', 'COUNT'])
+    }
+    
+    total_complexity = sum(complexity_indicators.values())
+    
+    if total_complexity > 5:
+        return "high", complexity_indicators
+    elif total_complexity > 2:
+        return "medium", complexity_indicators
+    else:
+        return "low", complexity_indicators
 
 # Define tool creation function
 def create_tools(db, db_path):
@@ -530,6 +832,11 @@ def create_tools(db, db_path):
             sql_query = sql_query[1:-1]
         
         try:
+            # Monitor query complexity
+            complexity, indicators = monitor_query_complexity(sql_query)
+            if complexity == "high":
+                st.warning(f"⚠️ Complex query detected: {indicators}")
+            
             if 'executed_queries' not in st.session_state:
                 st.session_state.executed_queries = []
             st.session_state.executed_queries.append(sql_query)
@@ -547,14 +854,16 @@ def create_tools(db, db_path):
                     'query': sql_query,
                     'dataframe': df,
                     'text_result': result,
-                    'timestamp': datetime.now()
+                    'timestamp': datetime.now(),
+                    'complexity': complexity
                 }
             except:
                 st.session_state.query_results = {
                     'query': sql_query,
                     'dataframe': None,
                     'text_result': result,
-                    'timestamp': datetime.now()
+                    'timestamp': datetime.now(),
+                    'complexity': complexity
                 }
             
             return result
@@ -580,23 +889,33 @@ def create_tools(db, db_path):
 def create_agents(tools, llm):
     """Create agents with given tools and LLM"""
     
+    # Get the advanced SQL instructions
+    advanced_instructions = create_advanced_sql_agent_instructions()
+    
     sql_specialist = Agent(
-        role="Senior Database Administrator",
-        goal="Extract accurate data from uploaded CSV and Excel files using optimized SQL queries",
-        backstory="""You are a database expert working with user-uploaded data files. 
+        role="Senior Database Administrator & SQL Expert",
+        goal="Extract accurate data using both simple and complex SQL queries including JOINs, window functions, CTEs, and advanced aggregations",
+        backstory=f"""You are a database expert working with user-uploaded data files. 
+        You excel at writing complex SQL queries.
+        
+        {advanced_instructions}
+        
         Always check what tables are available first. Remember that all data comes from 
-        CSV or Excel files uploaded by the user.""",
+        CSV or Excel files uploaded by the user. When multiple tables exist, consider if a JOIN
+        would provide better insights.""",
         verbose=True,
         allow_delegation=False,
         tools=tools,
-        llm=llm
+        llm=llm,
+        max_iter=5  # Allow more iterations for complex queries
     )
 
     data_analyst = Agent(
         role="Senior Data Analyst",
-        goal="Analyze query results and extract meaningful insights from uploaded data",
-        backstory="""You are a data analysis expert who specializes in finding patterns 
-        and insights in user-uploaded data from various file formats.""",
+        goal="Analyze query results and extract meaningful insights from both simple and complex SQL query results",
+        backstory="""You are a data analysis expert who specializes in interpreting results
+        from complex SQL queries including window functions, CTEs, and multi-table JOINs.
+        You can explain sophisticated analytical results in business terms.""",
         verbose=True,
         allow_delegation=False,
         llm=llm
@@ -606,7 +925,8 @@ def create_agents(tools, llm):
         role="Business Strategy Consultant",
         goal="Transform data insights into actionable business recommendations",
         backstory="""You are a senior business consultant who helps users make 
-        data-driven decisions based on their uploaded data.""",
+        data-driven decisions based on their uploaded data. You understand complex
+        analytical results and can translate them into strategic recommendations.""",
         verbose=True,
         allow_delegation=False,
         llm=llm
@@ -963,6 +1283,67 @@ def main():
                 placeholder="e.g., What are the top 10 products by revenue? Show me the trend over time."
             )
             
+            # Advanced SQL Features Section
+            with st.expander("🚀 Advanced SQL Features", expanded=False):
+                st.markdown("""
+                **Available Advanced Features:**
+                - **JOINs**: Combine multiple tables
+                - **Window Functions**: Rankings, running totals, moving averages
+                - **CTEs**: Multi-step analysis with temporary results
+                - **Advanced Aggregations**: Subtotals, rollups, conditional sums
+                
+                **Example Questions:**
+                - "Show running total of sales by date"
+                - "Rank customers by purchase amount within each region"
+                - "Calculate 30-day moving average of orders"
+                - "Compare this month's performance to last month"
+                - "Join customer and order tables to show full picture"
+                """)
+                
+                # Show available tables for JOIN operations
+                if len(st.session_state.uploaded_tables) > 1:
+                    st.markdown("**Available tables for JOIN operations:**")
+                    for table in st.session_state.uploaded_tables:
+                        st.write(f"- {table}")
+                    
+                    # Auto-detect JOIN possibilities
+                    if st.button("🔍 Detect JOIN possibilities"):
+                        tables_info = get_table_info(db_path)
+                        if len(tables_info) >= 2:
+                            st.markdown("**Possible JOINs detected:**")
+                            # Simple detection based on column names
+                            for t1 in tables_info:
+                                for t2 in tables_info:
+                                    if t1 != t2:
+                                        common_cols = set(tables_info[t1]['columns']) & set(tables_info[t2]['columns'])
+                                        if common_cols:
+                                            st.info(f"Tables '{t1}' and '{t2}' share columns: {', '.join(common_cols)}")
+                
+                # Show query templates
+                st.markdown("**📝 Query Templates:**")
+                template_options = {
+                    "Running Total": "running_total",
+                    "Ranking": "ranking",
+                    "Moving Average": "moving_average",
+                    "Year-over-Year": "year_over_year",
+                    "Top N per Group": "top_n_per_group",
+                    "Multi-table Analysis": "multi_table_analysis"
+                }
+                
+                selected_template = st.selectbox(
+                    "Choose a template:",
+                    options=["None"] + list(template_options.keys()),
+                    help="Select a query template to see example SQL"
+                )
+                
+                if selected_template != "None":
+                    template_key = template_options[selected_template]
+                    template_code = COMPLEX_QUERY_EXAMPLES.get(template_key, "")
+                    st.code(template_code, language='sql')
+                    
+                    if st.button("Use this template", key="use_template"):
+                        st.info("💡 Adapt this template to your data by updating table and column names in your question!")
+            
             col1_1, col1_2, col1_3 = st.columns([1, 1, 2])
             with col1_1:
                 analyze_button = st.button("🔍 Analyze", type="primary", use_container_width=True)
@@ -1069,6 +1450,11 @@ def main():
                         if len(result['queries']) > 1:
                             st.markdown(f"**Query {i}:**")
                         
+                        # Check query complexity
+                        complexity, indicators = monitor_query_complexity(query)
+                        if complexity == "high":
+                            st.markdown(f"<div class='complex-query-box'>⚡ Complex Query (JOINs: {indicators['joins']}, Window Functions: {indicators['window_functions']}, CTEs: {indicators['ctes']})</div>", unsafe_allow_html=True)
+                        
                         # Display query in a code block for better visibility
                         st.code(query, language='sql')
                 elif st.session_state.query_results:
@@ -1095,14 +1481,16 @@ def main():
                             'timestamp': current_timestamp,
                             'query': current_query,
                             'dataframe': df.copy(),
-                            'result_text': st.session_state.query_results.get('text_result', '')
+                            'result_text': st.session_state.query_results.get('text_result', ''),
+                            'complexity': st.session_state.query_results.get('complexity', 'low')
                         }
                     else:
                         st.session_state.query_history.append({
                             'timestamp': current_timestamp,
                             'query': current_query,
                             'dataframe': df.copy(),
-                            'result_text': st.session_state.query_results.get('text_result', '')
+                            'result_text': st.session_state.query_results.get('text_result', ''),
+                            'complexity': st.session_state.query_results.get('complexity', 'low')
                         })
                     
                     # Display results based on size
@@ -1202,8 +1590,13 @@ def main():
                     elif 'result_text' in item:
                         result_str = str(item['result_text'])[:100] + "..." if len(str(item['result_text'])) > 100 else str(item['result_text'])
                     
+                    # Add complexity indicator
+                    complexity = item.get('complexity', 'low')
+                    complexity_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(complexity, "🟢")
+                    
                     history_data.append({
                         'Time': item['timestamp'].strftime('%H:%M:%S'),
+                        'Complexity': complexity_icon,
                         'Query': item['query'],  # Full query, no truncation
                         'Result': result_str
                     })
@@ -1217,6 +1610,8 @@ def main():
                         if dedupe and len(history_items) < len(st.session_state.query_history):
                             st.caption(f"Showing {len(history_items)} unique queries from {len(st.session_state.query_history)} total executions")
                         
+                        st.caption("🟢 Simple | 🟡 Medium | 🔴 Complex")
+                        
                         # Show history table with full queries
                         st.dataframe(
                             history_df,
@@ -1224,6 +1619,7 @@ def main():
                             height=250,
                             column_config={
                                 "Time": st.column_config.TextColumn("Time", width="small"),
+                                "Complexity": st.column_config.TextColumn("", width="small"),
                                 "Query": st.column_config.TextColumn("Query", width="large"),
                                 "Result": st.column_config.TextColumn("Result", width="medium")
                             },
@@ -1236,7 +1632,8 @@ def main():
                             for item in st.session_state.query_history:
                                 history_item = {
                                     'Timestamp': item['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
-                                    'Query': item['query']
+                                    'Query': item['query'],
+                                    'Complexity': item.get('complexity', 'low')
                                 }
                                 
                                 if 'dataframe' in item and item['dataframe'] is not None:
@@ -1298,6 +1695,7 @@ def extract_sql_queries(text):
         r"```\n(SELECT.*?)\n```",
         r"Query:\s*(SELECT.*?)(?:\n|$)",
         r"(SELECT\s+.*?(?:;|$))",
+        r"(WITH\s+.*?SELECT\s+.*?(?:;|$))",  # Added pattern for CTEs
     ]
     
     queries = []
@@ -1328,6 +1726,8 @@ def run_analysis(question, agents):
             3. Available tables: {', '.join(st.session_state.uploaded_tables)}
             4. Make sure to query the correct table that contains the data for this question
             5. Show the exact SQL query you're executing
+            6. Use advanced SQL features when appropriate (JOINs, Window Functions, CTEs)
+            7. For complex questions, break them down using CTEs
             """,
             expected_output="SQL query results with the query used",
             agent=sql_specialist
@@ -1339,6 +1739,7 @@ def run_analysis(question, agents):
             
             Provide insights based on the actual data returned from the uploaded file.
             Look for patterns, trends, and interesting findings.
+            If the query used advanced SQL features, explain the insights they revealed.
             """,
             expected_output="Detailed analysis with insights",
             agent=data_analyst
@@ -1353,6 +1754,8 @@ def run_analysis(question, agents):
             - Key Findings
             - Recommendations
             - Next Steps
+            
+            If complex SQL was used, explain the business value of the advanced analysis.
             """,
             expected_output="Structured business report",
             agent=business_consultant
@@ -1440,6 +1843,20 @@ with st.sidebar:
     
     st.divider()
     
+    # SQL Features
+    st.subheader("🚀 SQL Features")
+    st.markdown("""
+    **Supported Operations:**
+    - ✅ Basic queries
+    - ✅ JOINs (all types)
+    - ✅ Window functions
+    - ✅ CTEs
+    - ✅ Advanced aggregations
+    - ✅ Date/time operations
+    """)
+    
+    st.divider()
+    
     # Help section
     with st.expander("❓ Help", expanded=False):
         st.markdown("""
@@ -1452,6 +1869,13 @@ with st.sidebar:
         5. **Load**: Give your table a meaningful name
         6. **Ask Questions**: Use suggested questions or write your own
         7. **View Results**: Check the Query & Results tab
+        
+        **Advanced SQL Tips:**
+        - Use "running total" for cumulative calculations
+        - Use "rank by" for ordering within groups
+        - Use "join" to combine multiple tables
+        - Use "moving average" for trend analysis
+        - Use "compare" for period-over-period analysis
         
         **Tips:**
         - Supports CSV and Excel (XLS, XLSX) files
@@ -1468,6 +1892,9 @@ with st.sidebar:
         - Calculate averages and totals
         - Group by categories
         - Compare different segments
+        - Rank within groups
+        - Calculate running totals
+        - Join multiple tables
         """)
     
     st.divider()
