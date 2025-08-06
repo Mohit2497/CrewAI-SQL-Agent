@@ -15,10 +15,6 @@ import plotly.graph_objects as go
 import re
 import json
 import tempfile
-from typing import Optional, Dict, List
-import threading
-from functools import wraps
-import requests
 
 # Import CrewAI components
 from crewai import Agent, Crew, Process, Task
@@ -33,7 +29,6 @@ from langchain_community.tools.sql_database.tool import (
 )
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_groq import ChatGroq
-from langchain_community.llms import Ollama
 
 # Load environment variables
 load_dotenv()
@@ -45,56 +40,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Rate Limiter Class (for GROQ)
-class RateLimiter:
-    """Thread-safe rate limiter for API calls"""
-    def __init__(self, calls_per_minute: int = 20):
-        self.calls_per_minute = calls_per_minute
-        self.min_interval = 60.0 / calls_per_minute
-        self.last_call = 0
-        self.lock = threading.Lock()
-        self.call_times = []
-    
-    def wait(self):
-        """Wait if necessary to respect rate limit"""
-        with self.lock:
-            now = time.time()
-            # Remove calls older than 1 minute
-            self.call_times = [t for t in self.call_times if now - t < 60]
-            
-            if len(self.call_times) >= self.calls_per_minute:
-                sleep_time = 60 - (now - self.call_times[0]) + 0.1
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                    now = time.time()
-                    self.call_times = [t for t in self.call_times if now - t < 60]
-            
-            self.call_times.append(now)
-
-# Global rate limiter for GROQ
-rate_limiter = RateLimiter(calls_per_minute=15)
-
-# Retry decorator
-def retry_with_backoff(max_retries: int = 3, backoff_factor: float = 2.0):
-    """Decorator for retrying functions with exponential backoff"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if "rate_limit" in str(e).lower() or "429" in str(e):
-                        wait_time = backoff_factor ** attempt
-                        if attempt < max_retries - 1:
-                            st.warning(f"Rate limit hit. Waiting {wait_time} seconds...")
-                            time.sleep(wait_time)
-                            continue
-                    raise e
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 # Custom CSS
 st.markdown("""
@@ -130,30 +75,6 @@ st.markdown("""
         margin: 1rem 0;
         border-radius: 0.25rem;
     }
-    .rate-limit-warning {
-        background-color: #fff3cd;
-        border: 1px solid #ffeeba;
-        color: #856404;
-        padding: 1rem;
-        border-radius: 0.25rem;
-        margin: 1rem 0;
-    }
-    .model-status {
-        padding: 0.5rem 1rem;
-        border-radius: 0.25rem;
-        margin: 0.5rem 0;
-        font-weight: 500;
-    }
-    .ollama-status {
-        background-color: #d1ecf1;
-        border: 1px solid #bee5eb;
-        color: #0c5460;
-    }
-    .groq-status {
-        background-color: #fff3cd;
-        border: 1px solid #ffeeba;
-        color: #856404;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -173,192 +94,209 @@ if 'query_history' not in st.session_state:
 if 'session_id' not in st.session_state:
     st.session_state.session_id = datetime.now().strftime('%Y%m%d_%H%M%S')
 if 'temp_db_path' not in st.session_state:
+    # Create a temporary database file for this session
     temp_file = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
     st.session_state.temp_db_path = temp_file.name
     temp_file.close()
-if 'api_calls' not in st.session_state:
-    st.session_state.api_calls = 0
-if 'last_api_call' not in st.session_state:
-    st.session_state.last_api_call = None
-if 'llm_type' not in st.session_state:
-    st.session_state.llm_type = None
 
-# Check Ollama availability
-def check_ollama_status():
-    """Check if Ollama is running and has models"""
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
-        if response.status_code == 200:
-            models = response.json().get('models', [])
-            codellama_models = [m for m in models if 'codellama' in m.get('name', '').lower()]
-            if codellama_models:
-                return True, "ready", codellama_models[0]['name']
-            elif models:
-                return True, "no_codellama", models[0]['name']
-            else:
-                return True, "no_models", None
-        return False, "not_running", None
-    except:
-        return False, "not_running", None
-
-# Rate-limited LLM wrapper for GROQ
-class RateLimitedLLM:
-    """Wrapper for GROQ LLM with rate limiting"""
-    def __init__(self, llm, rate_limiter):
-        self.llm = llm
-        self.rate_limiter = rate_limiter
-        self.max_retries = 3
+# SQL Query Builder Helpers
+class AdvancedQueryBuilder:
+    """Helper class for building complex SQL queries"""
     
-    @retry_with_backoff(max_retries=3)
-    def invoke(self, prompt: str, **kwargs):
-        """Invoke LLM with rate limiting"""
-        self.rate_limiter.wait()
-        st.session_state.api_calls += 1
-        st.session_state.last_api_call = datetime.now()
+    @staticmethod
+    def detect_join_columns(df1, df2, table1_name, table2_name):
+        """Detect potential join columns between two dataframes"""
+        join_suggestions = []
         
-        try:
-            # Truncate prompt if too long to save tokens
-            if len(prompt) > 2000:
-                prompt = prompt[:2000] + "..."
-            
-            response = self.llm.invoke(prompt, **kwargs)
-            return response
-        except Exception as e:
-            if "rate_limit" in str(e).lower():
-                st.error("Rate limit exceeded. Waiting before retry...")
-                time.sleep(30)
-                raise
-            else:
-                raise
+        # Check for exact column name matches
+        common_columns = set(df1.columns) & set(df2.columns)
+        for col in common_columns:
+            if col.lower().endswith('_id') or col.lower() == 'id':
+                join_suggestions.append({
+                    'confidence': 'high',
+                    'column1': col,
+                    'column2': col,
+                    'suggested_query': f"JOIN {table2_name} ON {table1_name}.{col} = {table2_name}.{col}"
+                })
+        
+        # Check for foreign key patterns
+        for col1 in df1.columns:
+            if col1.lower().endswith('_id'):
+                base_name = col1[:-3]  # Remove '_id'
+                if 'id' in df2.columns:
+                    join_suggestions.append({
+                        'confidence': 'medium',
+                        'column1': col1,
+                        'column2': 'id',
+                        'suggested_query': f"JOIN {table2_name} ON {table1_name}.{col1} = {table2_name}.id"
+                    })
+        
+        return join_suggestions
     
-    def __getattr__(self, name):
-        """Proxy other attributes to the wrapped LLM"""
-        return getattr(self.llm, name)
+    @staticmethod
+    def build_window_function(func_type, column, partition_by=None, order_by=None, window_frame=None):
+        """Build window function syntax"""
+        base_func = f"{func_type}({column})"
+        over_clause_parts = []
+        
+        if partition_by:
+            over_clause_parts.append(f"PARTITION BY {partition_by}")
+        if order_by:
+            over_clause_parts.append(f"ORDER BY {order_by}")
+        if window_frame:
+            over_clause_parts.append(window_frame)
+        
+        if over_clause_parts:
+            return f"{base_func} OVER ({' '.join(over_clause_parts)})"
+        else:
+            return f"{base_func} OVER ()"
+    
+    @staticmethod
+    def build_cte(cte_name, query):
+        """Build Common Table Expression"""
+        return f"WITH {cte_name} AS (\n  {query}\n)"
 
-# Initialize LLM with Ollama primary and GROQ fallback
+# Complex Query Examples
+COMPLEX_QUERY_EXAMPLES = {
+    "running_total": """-- Running total example
+SELECT 
+    date,
+    amount,
+    SUM(amount) OVER (ORDER BY date) as running_total
+FROM sales
+ORDER BY date;""",
+    
+    "ranking": """-- Rank within groups
+SELECT 
+    category,
+    product_name,
+    sales_amount,
+    RANK() OVER (PARTITION BY category ORDER BY sales_amount DESC) as rank_in_category
+FROM products
+ORDER BY category, rank_in_category;""",
+    
+    "moving_average": """-- 7-day moving average
+SELECT 
+    date,
+    daily_sales,
+    AVG(daily_sales) OVER (
+        ORDER BY date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) as moving_avg_7_days
+FROM daily_metrics;""",
+    
+    "year_over_year": """-- Year-over-year comparison using CTEs
+WITH current_year AS (
+    SELECT 
+        STRFTIME('%m', date) as month,
+        SUM(amount) as cy_sales
+    FROM sales
+    WHERE STRFTIME('%Y', date) = '2024'
+    GROUP BY month
+),
+previous_year AS (
+    SELECT 
+        STRFTIME('%m', date) as month,
+        SUM(amount) as py_sales
+    FROM sales
+    WHERE STRFTIME('%Y', date) = '2023'
+    GROUP BY month
+)
+SELECT 
+    cy.month,
+    cy.cy_sales,
+    py.py_sales,
+    ROUND((cy.cy_sales - py.py_sales) * 100.0 / py.py_sales, 2) as yoy_growth_pct
+FROM current_year cy
+LEFT JOIN previous_year py ON cy.month = py.month
+ORDER BY cy.month;""",
+    
+    "top_n_per_group": """-- Top 3 products per category
+WITH ranked_products AS (
+    SELECT 
+        category,
+        product_name,
+        total_sales,
+        ROW_NUMBER() OVER (PARTITION BY category ORDER BY total_sales DESC) as rn
+    FROM product_sales
+)
+SELECT 
+    category,
+    product_name,
+    total_sales
+FROM ranked_products
+WHERE rn <= 3
+ORDER BY category, rn;""",
+    
+    "multi_table_analysis": """-- Complex multi-table analysis with CTEs
+WITH customer_metrics AS (
+    SELECT 
+        c.customer_id,
+        c.customer_name,
+        c.region,
+        COUNT(DISTINCT o.order_id) as order_count,
+        SUM(o.total_amount) as total_spent
+    FROM customers c
+    LEFT JOIN orders o ON c.customer_id = o.customer_id
+    GROUP BY c.customer_id, c.customer_name, c.region
+),
+regional_averages AS (
+    SELECT 
+        region,
+        AVG(total_spent) as avg_regional_spent
+    FROM customer_metrics
+    GROUP BY region
+)
+SELECT 
+    cm.customer_name,
+    cm.region,
+    cm.order_count,
+    cm.total_spent,
+    ra.avg_regional_spent,
+    ROUND(cm.total_spent - ra.avg_regional_spent, 2) as diff_from_regional_avg
+FROM customer_metrics cm
+JOIN regional_averages ra ON cm.region = ra.region
+ORDER BY cm.total_spent DESC;"""
+}
+
+# Initialize LLM (cached)
 @st.cache_resource
 def initialize_llm():
-    """Initialize LLM with Ollama (primary) and GROQ (fallback)"""
-    
-    # Check Ollama first
-    ollama_available, ollama_status, available_model = check_ollama_status()
-    
-    if ollama_available and ollama_status in ["ready", "no_codellama"]:
-        try:
-            # Try CodeLlama first, then any available model
-            model_to_use = "codellama:7b-instruct" if ollama_status == "ready" else available_model
-            
-            st.info(f"🔄 Connecting to Ollama ({model_to_use})...")
-            
-            llm = Ollama(
-                model=model_to_use,
-                base_url="http://localhost:11434",
-                temperature=0,
-                num_ctx=4096,
-                num_predict=1000,
-                top_k=10,
-                top_p=0.95,
-                system="""You are an expert SQL assistant. You excel at:
-                - Writing efficient SQL queries including JOINs, CTEs, and window functions
-                - Understanding database schemas and relationships
-                - Explaining query results clearly
-                - Providing data analysis insights
-                Be precise and concise."""
-            )
-            
-            # Test the connection
-            test_response = llm.invoke("SELECT 1")
-            st.success(f"✅ Connected to {model_to_use} via Ollama!")
-            st.success("🚀 **No API limits** - Run unlimited queries!")
-            st.session_state.llm_type = "ollama"
-            
-            return llm
-            
-        except Exception as e:
-            st.warning(f"⚠️ Ollama connection failed: {str(e)}")
-    
-    elif ollama_status == "no_models":
-        st.info("""
-        📦 **Ollama is running but no models found!**
+    """Initialize the language model"""
+    try:
+        # For Hugging Face Spaces, secrets are in environment variables
+        api_key = os.getenv("GROQ_API_KEY")
         
-        Run this in terminal:
-        ```bash
-        ollama pull codellama:7b-instruct
-        ```
-        """)
-    else:
-        st.info("""
-        💡 **Want unlimited queries? Install Ollama:**
-        1. Download from https://ollama.ai
-        2. Run: `ollama serve`
-        3. Pull model: `ollama pull codellama:7b-instruct`
-        """)
-    
-    # Try GROQ as fallback
-    groq_key = os.getenv("GROQ_API_KEY")
-    if groq_key:
-        st.warning("⚡ Using GROQ API (rate limited - 15 calls/minute)")
-        try:
-            # Try different GROQ models
-            models_to_try = [
-                "llama3-70b-8192",
-                "mixtral-8x7b-32768",
-                "llama3-8b-8192"
-            ]
+        if not api_key:
+            st.error("Please set GROQ_API_KEY in Space Settings → Repository secrets")
+            return None
             
-            llm = None
-            for model in models_to_try:
-                try:
-                    llm = ChatGroq(
-                        temperature=0,
-                        model_name=model,
-                        api_key=groq_key,
-                        max_tokens=500,
-                        timeout=30,
-                        max_retries=2
-                    )
-                    # Test the model
-                    test_response = llm.invoke("Say test")
-                    st.success(f"✅ Connected to GROQ ({model})")
-                    st.session_state.llm_type = "groq"
-                    break
-                except Exception as e:
-                    continue
-            
-            if llm:
-                return RateLimitedLLM(llm, rate_limiter)
-            else:
-                st.error("❌ All GROQ models failed")
-        except Exception as e:
-            st.error(f"❌ GROQ initialization failed: {str(e)}")
-    
-    # No LLM available
-    st.error("""
-    ❌ **No LLM available!**
-    
-    **Option 1 (Recommended - Free & Unlimited):**
-    1. Install Ollama from https://ollama.ai
-    2. Run: `ollama serve`
-    3. Pull model: `ollama pull codellama:7b-instruct`
-    
-    **Option 2 (Rate Limited):**
-    Add GROQ_API_KEY to your .env file
-    """)
-    
-    return None
+        llm = ChatGroq(
+            temperature=0,
+            model_name="llama3-70b-8192",
+            api_key=api_key
+        )
+        return llm
+    except Exception as e:
+        st.error(f"Failed to initialize LLM: {str(e)}")
+        return None
 
 # Initialize Database
 def get_database_connection():
     """Get current database connection"""
     try:
+        # Use the session's temporary database
         db_path = st.session_state.temp_db_path
+        
+        # Create SQLDatabase object
         db = SQLDatabase.from_uri(f"sqlite:///{db_path}")
+        
         return db, db_path
     except Exception as e:
         st.error(f"Failed to connect to database: {str(e)}")
         return None, None
 
-# CSV/Excel Processing Functions
+# Enhanced CSV Processing Functions with Validation
 def validate_csv_structure(df):
     """Comprehensive CSV validation with detailed feedback"""
     validation_results = {
@@ -671,7 +609,7 @@ def load_csv_to_database(df, table_name, db_path):
         return None
 
 def get_table_info(db_path):
-    """Get detailed information about all tables"""
+    """Get detailed information about all tables for generating smart questions"""
     tables_info = {}
     
     try:
@@ -728,144 +666,115 @@ def get_table_info(db_path):
     except Exception as e:
         return {}
 
-# Generate simple questions that don't require AI
-def generate_simple_questions(df, table_name):
-    """Generate simple questions that can be answered without AI"""
+def generate_csv_questions(df, table_name):
+    """Generate relevant questions based on CSV data including advanced SQL operations"""
     questions = []
     
-    # Basic questions
-    questions.append(f"Show all data from {table_name}")
-    questions.append(f"How many records are in {table_name}?")
-    questions.append(f"Show columns in {table_name}")
-    
-    # Get column names
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     text_cols = df.select_dtypes(include=['object']).columns.tolist()
+    date_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
     
+    # Basic questions
+    questions.append(f"Show me all data from {table_name}")
+    questions.append(f"How many records are in {table_name}?")
+    
+    # Window function questions
     if numeric_cols:
-        questions.append(f"Show minimum and maximum {numeric_cols[0]} from {table_name}")
+        col = numeric_cols[0]
+        questions.append(f"Show running total of {col} in {table_name}")
+        questions.append(f"Calculate 7-day moving average of {col}")
+        
+        if text_cols:
+            questions.append(f"Rank records by {col} within each {text_cols[0]}")
+            questions.append(f"Show top 3 {text_cols[0]} by {col} using window functions")
     
-    if text_cols:
-        questions.append(f"Show unique {text_cols[0]} values from {table_name}")
+    # Advanced aggregation questions
+    if text_cols and numeric_cols:
+        questions.append(f"Show {numeric_cols[0]} by {text_cols[0]} with subtotals and grand total")
+        questions.append(f"Calculate percentage of total {numeric_cols[0]} for each {text_cols[0]}")
+    
+    # Date-based advanced questions
+    if date_cols and numeric_cols:
+        questions.append(f"Compare {numeric_cols[0]} month-over-month from {table_name}")
+        questions.append(f"Show year-to-date cumulative {numeric_cols[0]}")
+    
+    # CTE questions
+    if len(numeric_cols) > 1:
+        questions.append(f"Identify outliers and analyze their characteristics in {table_name}")
+    
+    # Multi-table questions (if other tables exist)
+    if st.session_state.uploaded_tables and len(st.session_state.uploaded_tables) > 1:
+        other_tables = [t for t in st.session_state.uploaded_tables if t != table_name]
+        questions.append(f"Join {table_name} with {other_tables[0]} to show combined insights")
     
     return questions
 
-# Optimized generate_csv_questions
-def generate_csv_questions(df, table_name):
-    """Generate questions - both simple and complex"""
-    simple_questions = generate_simple_questions(df, table_name)
+def create_advanced_sql_agent_instructions():
+    """Create instructions for SQL agents to handle advanced queries"""
+    return """
+    You are an expert SQL developer who specializes in complex queries. You can handle:
     
-    # Add a few complex questions if we have the columns for it
-    complex_questions = []
+    1. **JOIN Operations**:
+       - INNER JOIN: When user wants matching records from both tables
+       - LEFT JOIN: When user wants all records from first table
+       - FULL OUTER JOIN: When user wants all records from both tables
+       - Self JOIN: When comparing records within same table
+       - Multiple JOINs: Connect 3 or more tables
     
-    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    text_cols = df.select_dtypes(include=['object']).columns.tolist()
+    2. **Window Functions**:
+       - ROW_NUMBER(): For ranking without ties
+       - RANK(): For ranking with ties
+       - DENSE_RANK(): For ranking with consecutive ranks
+       - Running totals: SUM() OVER (ORDER BY ...)
+       - Moving averages: AVG() OVER (ROWS BETWEEN n PRECEDING AND CURRENT ROW)
+       - LAG/LEAD: Access previous/next row values
+       - PERCENT_RANK(): Calculate percentile ranking
     
-    if numeric_cols and text_cols:
-        complex_questions.append(f"What is the average {numeric_cols[0]} by {text_cols[0]}?")
-        complex_questions.append(f"Show top 5 {text_cols[0]} by {numeric_cols[0]}")
+    3. **Advanced Aggregations**:
+       - GROUP BY with ROLLUP: For subtotals and grand totals
+       - GROUP BY with multiple columns: Multi-dimensional analysis
+       - HAVING clause: Filter aggregated results
+       - Conditional aggregation: SUM(CASE WHEN ... THEN ... END)
+       - Statistical functions: STDDEV, VARIANCE
     
-    if numeric_cols:
-        complex_questions.append(f"Calculate running total of {numeric_cols[0]}")
+    4. **Common Table Expressions (CTEs)**:
+       - Simple CTEs: WITH temp_table AS (SELECT ...)
+       - Multiple CTEs: Chain multiple temporary results
+       - Use CTEs to break down complex queries into readable steps
     
-    if len(st.session_state.uploaded_tables) > 1:
-        other_table = [t for t in st.session_state.uploaded_tables if t != table_name][0]
-        complex_questions.append(f"Compare {table_name} with {other_table}")
+    When user asks questions like:
+    - "Compare X across Y" → Use window functions
+    - "Show relationship between tables" → Use appropriate JOIN
+    - "Calculate running total" → Use SUM() OVER()
+    - "Show top N per group" → Use ROW_NUMBER() with PARTITION BY
+    - "Multi-step analysis" → Use CTEs
     
-    return simple_questions + complex_questions
+    Always:
+    - Check available tables first
+    - Verify column names exist
+    - Use appropriate JOIN conditions
+    - Consider performance (use LIMIT for testing)
+    - Explain what the query does
+    """
 
-# Format numeric values
-def format_numeric_value(value):
-    """Format numeric values with appropriate decimal places"""
-    if isinstance(value, (int, float)):
-        if isinstance(value, float):
-            return round(value, 2)
-        else:
-            return value
-    return value
-
-# Extract SQL queries from text
-def extract_sql_queries(text):
-    """Extract SQL queries from the analysis text"""
-    patterns = [
-        r"```sql\n(.*?)\n```",
-        r"```\n(SELECT.*?)\n```",
-        r"Query:\s*(SELECT.*?)(?:\n|$)",
-        r"(SELECT\s+.*?(?:;|$))",
-        r"(WITH\s+.*?SELECT\s+.*?(?:;|$))",
-    ]
+def monitor_query_complexity(query):
+    """Check if query is complex and might need optimization"""
+    complexity_indicators = {
+        'joins': query.upper().count('JOIN'),
+        'subqueries': query.upper().count('SELECT') - 1,
+        'window_functions': query.upper().count('OVER'),
+        'ctes': query.upper().count('WITH'),
+        'aggregations': sum(query.upper().count(func) for func in ['GROUP BY', 'SUM', 'AVG', 'COUNT'])
+    }
     
-    queries = []
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE | re.MULTILINE)
-        for match in matches:
-            query = match.strip()
-            if query and not any(query == q for q in queries):
-                queries.append(query)
+    total_complexity = sum(complexity_indicators.values())
     
-    return queries
-
-# Create optimized agents based on LLM type
-def create_agents(tools, llm):
-    """Create agents optimized for the available LLM"""
-    if llm is None:
-        return None
-    
-    # Adjust prompts based on LLM type
-    if st.session_state.llm_type == "ollama":
-        # Optimized for CodeLlama
-        sql_specialist = Agent(
-            role="SQL Expert",
-            goal="Write efficient SQL queries",
-            backstory="""You are CodeLlama, specialized in SQL. Focus on:
-            - Correct SQL syntax with JOINs, CTEs, window functions
-            - Query optimization
-            - Clear column aliases
-            Always verify table and column names.""",
-            verbose=False,
-            allow_delegation=False,
-            tools=tools,
-            llm=llm,
-            max_iter=3,
-            memory=False
-        )
+    if total_complexity > 5:
+        return "high", complexity_indicators
+    elif total_complexity > 2:
+        return "medium", complexity_indicators
     else:
-        # Optimized for GROQ (shorter prompts)
-        sql_specialist = Agent(
-            role="SQL Expert",
-            goal="Write SQL queries",
-            backstory="SQL expert. Write efficient queries. Be concise.",
-            verbose=False,
-            allow_delegation=False,
-            tools=tools,
-            llm=llm,
-            max_iter=2,
-            memory=False
-        )
-
-    data_analyst = Agent(
-        role="Data Analyst",
-        goal="Analyze query results",
-        backstory="Analyze data for patterns and insights. Be concise.",
-        verbose=False,
-        allow_delegation=False,
-        llm=llm,
-        max_iter=1,
-        memory=False
-    )
-
-    business_consultant = Agent(
-        role="Business Consultant",
-        goal="Create recommendations",
-        backstory="Transform insights into business recommendations. Brief format.",
-        verbose=False,
-        allow_delegation=False,
-        llm=llm,
-        max_iter=1,
-        memory=False
-    )
-    
-    return [sql_specialist, data_analyst, business_consultant]
+        return "low", complexity_indicators
 
 # Define tool creation function
 def create_tools(db, db_path):
@@ -875,55 +784,43 @@ def create_tools(db, db_path):
     def list_tables() -> str:
         """List all available tables in the database"""
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            conn.close()
+            tool = ListSQLDatabaseTool(db=db)
+            result = tool.invoke("")
             
-            if not tables:
+            if not result or "No tables" in result:
                 return "No tables found. Please upload a CSV or Excel file first."
             
-            table_names = [t[0] for t in tables]
-            result = f"Available tables: {', '.join(table_names)}"
-            
             if st.session_state.uploaded_tables:
-                result += f"\n\nUploaded in this session: {', '.join(st.session_state.uploaded_tables)}"
+                result += f"\n\nUploaded tables in this session: {', '.join(st.session_state.uploaded_tables)}"
             
             return result
         except Exception as e:
-            return f"Error listing tables: {str(e)}"
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = cursor.fetchall()
+                conn.close()
+                
+                if not tables:
+                    return "No tables found. Please upload a CSV or Excel file first."
+                
+                table_names = [t[0] for t in tables]
+                result = f"Available tables: {', '.join(table_names)}"
+                
+                if st.session_state.uploaded_tables:
+                    result += f"\n\nUploaded in this session: {', '.join(st.session_state.uploaded_tables)}"
+                
+                return result
+            except Exception as e2:
+                return f"Error listing tables: {str(e2)}"
 
     @tool("tables_schema")
     def tables_schema(tables: str) -> str:
         """Get schema and sample data for specified tables"""
         try:
-            conn = sqlite3.connect(db_path)
-            result = []
-            
-            for table in tables.split(','):
-                table = table.strip()
-                cursor = conn.cursor()
-                
-                # Get column info
-                cursor.execute(f"PRAGMA table_info({table})")
-                columns = cursor.fetchall()
-                
-                result.append(f"\nTable: {table}")
-                result.append("Columns:")
-                for col in columns:
-                    result.append(f"  - {col[1]} ({col[2]})")
-                
-                # Get sample data
-                cursor.execute(f"SELECT * FROM {table} LIMIT 3")
-                samples = cursor.fetchall()
-                if samples:
-                    result.append("Sample data:")
-                    for row in samples:
-                        result.append(f"  {row}")
-            
-            conn.close()
-            return '\n'.join(result)
+            tool = InfoSQLDatabaseTool(db=db)
+            return tool.invoke(tables)
         except Exception as e:
             return f"Error getting schema: {str(e)}"
 
@@ -935,236 +832,122 @@ def create_tools(db, db_path):
             sql_query = sql_query[1:-1]
         
         try:
-            conn = sqlite3.connect(db_path)
+            # Monitor query complexity
+            complexity, indicators = monitor_query_complexity(sql_query)
+            if complexity == "high":
+                st.warning(f"⚠️ Complex query detected: {indicators}")
             
-            # Execute query
-            df = pd.read_sql_query(sql_query, conn)
-            conn.close()
+            if 'executed_queries' not in st.session_state:
+                st.session_state.executed_queries = []
+            st.session_state.executed_queries.append(sql_query)
             
-            # Store results
-            st.session_state.query_results = {
-                'query': sql_query,
-                'dataframe': df,
-                'text_result': df.to_string() if len(df) < 20 else f"{df.head(20).to_string()}\n... ({len(df)} total rows)",
-                'timestamp': datetime.now()
-            }
+            tool = QuerySQLDataBaseTool(db=db)
+            result = tool.invoke(sql_query)
             
-            # Return formatted result
-            if len(df) == 0:
-                return "Query returned no results"
-            elif len(df) == 1 and len(df.columns) == 1:
-                return f"Result: {df.iloc[0, 0]}"
-            elif len(df) <= 10:
-                return df.to_string()
-            else:
-                return f"{df.head(10).to_string()}\n... showing 10 of {len(df)} rows"
+            # Also get as dataframe
+            try:
+                conn = sqlite3.connect(db_path)
+                df = pd.read_sql_query(sql_query, conn)
+                conn.close()
                 
+                st.session_state.query_results = {
+                    'query': sql_query,
+                    'dataframe': df,
+                    'text_result': result,
+                    'timestamp': datetime.now(),
+                    'complexity': complexity
+                }
+            except:
+                st.session_state.query_results = {
+                    'query': sql_query,
+                    'dataframe': None,
+                    'text_result': result,
+                    'timestamp': datetime.now(),
+                    'complexity': complexity
+                }
+            
+            return result
         except Exception as e:
             return f"Error executing query: {str(e)}"
 
     @tool("check_sql")
     def check_sql(sql_query: str) -> str:
         """Validate SQL query before execution"""
-        sql_upper = sql_query.upper()
-        
-        # Check for dangerous operations
-        dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE']
-        for keyword in dangerous_keywords:
-            if keyword in sql_upper:
-                return f"Warning: Query contains {keyword} statement"
-        
-        # Check if tables exist
-        table_pattern = r'FROM\s+(\w+)'
-        tables = re.findall(table_pattern, sql_query, re.IGNORECASE)
-        
-        for table in tables:
-            if table.lower() not in [t.lower() for t in st.session_state.uploaded_tables]:
-                return f"Warning: Table '{table}' may not exist"
-        
-        return "Query validation passed"
+        try:
+            llm = st.session_state.get('llm', None)
+            if llm:
+                tool = QuerySQLCheckerTool(db=db, llm=llm)
+                return tool.invoke({"query": sql_query})
+            else:
+                return "Query validation passed"
+        except:
+            return "Query validation passed"
     
     return [list_tables, tables_schema, execute_sql, check_sql]
 
-# Simple query executor for basic queries
-def execute_simple_query(question: str, table_name: str, db_path: str) -> Dict:
-    """Execute simple queries without using LLM"""
-    try:
-        conn = sqlite3.connect(db_path)
+# Create agents function
+def create_agents(tools, llm):
+    """Create agents with given tools and LLM"""
+    
+    # Get the advanced SQL instructions
+    advanced_instructions = create_advanced_sql_agent_instructions()
+    
+    sql_specialist = Agent(
+        role="Senior Database Administrator & SQL Expert",
+        goal="Extract accurate data using both simple and complex SQL queries including JOINs, window functions, CTEs, and advanced aggregations",
+        backstory=f"""You are a database expert working with user-uploaded data files. 
+        You excel at writing complex SQL queries.
         
-        # Pattern matching for simple queries
-        question_lower = question.lower()
+        {advanced_instructions}
         
-        if "show all" in question_lower or "show me all" in question_lower:
-            query = f"SELECT * FROM {table_name} LIMIT 100"
-        elif "count" in question_lower or "how many" in question_lower:
-            query = f"SELECT COUNT(*) as total_count FROM {table_name}"
-        elif "columns" in question_lower or "schema" in question_lower:
-            query = f"PRAGMA table_info({table_name})"
-        else:
-            return None
-        
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-        
-        result_text = f"Query executed: {query}\n\nResults:\n{df.to_string()}"
-        
-        # Store in session state
-        st.session_state.query_results = {
-            'query': query,
-            'dataframe': df,
-            'text_result': result_text,
-            'timestamp': datetime.now()
-        }
-        
-        return {
-            "success": True,
-            "question": question,
-            "timestamp": datetime.now(),
-            "result": result_text,
-            "queries": [query]
-        }
-        
-    except Exception as e:
-        return None
+        Always check what tables are available first. Remember that all data comes from 
+        CSV or Excel files uploaded by the user. When multiple tables exist, consider if a JOIN
+        would provide better insights.""",
+        verbose=True,
+        allow_delegation=False,
+        tools=tools,
+        llm=llm,
+        max_iter=5  # Allow more iterations for complex queries
+    )
 
-# Optimized run_analysis function
-def run_analysis(question, agents):
-    """Run analysis with rate limiting and error handling"""
-    st.session_state.executed_queries = []
-    
-    # Check if using GROQ and enforce rate limits
-    if st.session_state.llm_type == "groq":
-        if st.session_state.last_api_call:
-            time_since_last = (datetime.now() - st.session_state.last_api_call).seconds
-            if time_since_last < 4:
-                wait_time = 4 - time_since_last
-                with st.spinner(f"Rate limiting: waiting {wait_time} seconds..."):
-                    time.sleep(wait_time)
-    
-    try:
-        sql_specialist, data_analyst, business_consultant = agents
-        
-        # Adjust task descriptions based on LLM type
-        if st.session_state.llm_type == "ollama":
-            # More detailed for Ollama
-            data_extraction = Task(
-                description=f"""
-                Extract data to answer: {question}
-                
-                Tables available: {', '.join(st.session_state.uploaded_tables)}
-                Write and execute appropriate SQL query.
-                Use JOINs, CTEs, or window functions if needed.
-                """,
-                expected_output="SQL query and results",
-                agent=sql_specialist
-            )
+    data_analyst = Agent(
+        role="Senior Data Analyst",
+        goal="Analyze query results and extract meaningful insights from both simple and complex SQL query results",
+        backstory="""You are a data analysis expert who specializes in interpreting results
+        from complex SQL queries including window functions, CTEs, and multi-table JOINs.
+        You can explain sophisticated analytical results in business terms.""",
+        verbose=True,
+        allow_delegation=False,
+        llm=llm
+    )
+
+
+    return [sql_specialist, data_analyst]
+
+# Format numeric value helper
+def format_numeric_value(value):
+    """Format numeric values with appropriate decimal places"""
+    if isinstance(value, (int, float)):
+        if isinstance(value, float):
+            # Round to 2 decimal places if it's a float
+            return round(value, 2)
         else:
-            # Concise for GROQ
-            data_extraction = Task(
-                description=f"Query: {question[:100]}\nTables: {', '.join(st.session_state.uploaded_tables[:5])}\nWrite SQL.",
-                expected_output="SQL query",
-                agent=sql_specialist
-            )
-        
-        data_analysis = Task(
-            description=f"Analyze results for: {question[:50]}",
-            expected_output="Key insights",
-            agent=data_analyst
-        )
-        
-        business_report = Task(
-            description="Create brief recommendations",
-            expected_output="Summary and recommendations",
-            agent=business_consultant
-        )
-        
-        # Create crew
-        crew = Crew(
-            agents=[sql_specialist, data_analyst, business_consultant],
-            tasks=[data_extraction, data_analysis, business_report],
-            process=Process.sequential,
-            verbose=0,
-            memory=False,
-            embedder={
-                "provider": "literal",
-                "config": {"api_key": "dummy"}
-            }
-        )
-        
-        # Show appropriate warnings
-        if st.session_state.llm_type == "groq" and st.session_state.api_calls > 10:
-            st.warning("⚠️ High API usage. Consider switching to Ollama for unlimited queries.")
-        
-        # Execute with progress tracking
-        progress_bar = st.progress(0)
-        status_placeholder = st.empty()
-        
-        try:
-            status_placeholder.text("🚀 Starting analysis...")
-            progress_bar.progress(0.2)
-            time.sleep(0.5)
-            
-            status_placeholder.text("📝 Generating SQL query...")
-            progress_bar.progress(0.4)
-            
-            result = crew.kickoff()
-            
-            status_placeholder.text("✅ Analysis complete!")
-            progress_bar.progress(1.0)
-            time.sleep(0.5)
-            
-        finally:
-            progress_bar.empty()
-            status_placeholder.empty()
-        
-        # Extract queries
-        result_str = str(result)
-        queries = extract_sql_queries(result_str)
-        
-        return {
-            "success": True,
-            "question": question,
-            "timestamp": datetime.now(),
-            "result": result_str,
-            "queries": queries
-        }
-        
-    except Exception as e:
-        error_msg = str(e).lower()
-        
-        if "rate_limit" in error_msg or "429" in error_msg:
-            st.error("🚫 Rate limit exceeded!")
-            st.info("""
-            **Solutions:**
-            1. Install Ollama for unlimited queries (recommended)
-            2. Wait 60 seconds before trying again
-            3. Use simpler questions
-            """)
-            
-            # Show cooldown timer
-            progress_bar = st.progress(0)
-            for i in range(60):
-                progress_bar.progress((i + 1) / 60)
-                time.sleep(1)
-            progress_bar.empty()
-            
-            st.success("✅ You can try again now!")
-        else:
-            st.error(f"❌ Analysis failed: {str(e)}")
-            with st.expander("Error details"):
-                st.code(str(e))
-        
-        return {
-            "success": False,
-            "error": str(e),
-            "question": question,
-            "timestamp": datetime.now()
-        }
+            return value
+    return value
 
 # Main UI
 def main():
     # Initialize system
     llm = initialize_llm()
+    
+    # Check LLM initialization
+    if llm is None:
+        st.error("Failed to initialize LLM. Please check your GROQ_API_KEY")
+        st.stop()
+        return
+    
+    # Store LLM in session state
+    st.session_state.llm = llm
     
     # Get database connection
     db, db_path = get_database_connection()
@@ -1174,37 +957,22 @@ def main():
         st.stop()
         return
     
-    # Store LLM in session state
-    st.session_state.llm = llm
-    
-    # Header with model status
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
+    # Header
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
         st.title("🤖 CrewAI SQL Agent")
         st.markdown("### Upload CSV or Excel files and ask questions about your data")
-    with col2:
-        if st.session_state.llm_type == "ollama":
-            st.markdown('<div class="model-status ollama-status">🟢 Ollama (Unlimited)</div>', unsafe_allow_html=True)
-        elif st.session_state.llm_type == "groq":
-            st.metric("API Calls", st.session_state.api_calls)
-    with col3:
-        if st.session_state.llm_type == "groq":
-            calls_remaining = max(0, 15 - (st.session_state.api_calls % 15))
-            st.metric("Calls Left", calls_remaining)
     
-    # Show rate limit warning for GROQ
-    if st.session_state.llm_type == "groq" and st.session_state.api_calls > 10:
-        st.markdown("""
-        <div class="rate-limit-warning">
-        ⚠️ <strong>Rate Limit Warning:</strong> Consider installing Ollama for unlimited queries.
-        </div>
-        """, unsafe_allow_html=True)
+    # Check if any data is uploaded
+    if not st.session_state.uploaded_tables:
+        st.info("👋 Welcome! Start by uploading a CSV or Excel file in the 'Data Upload' tab.")
+    else:
+        st.success(f"✅ Ready to analyze {len(st.session_state.uploaded_tables)} table(s)")
     
     # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3 = st.tabs([
         "📤 Data Upload", 
-        "🔍 Analysis", 
-        "📊 Full Report", 
+        "🔍 Analysis",  
         "💾 Query & Results"
     ])
     
@@ -1491,15 +1259,6 @@ def main():
         with col1:
             st.header("🤔 Ask Your Question")
             
-            # Show LLM status
-            if llm is None:
-                st.error("❌ No LLM available. Please set up Ollama or add GROQ_API_KEY")
-                st.stop()
-            
-            # Simple query options (only if no LLM or for basic queries)
-            use_simple = st.checkbox("Use simple mode (no AI, instant results)", 
-                                   help="For basic queries like 'show all data' or 'count rows'")
-            
             if st.session_state.csv_preview_data:
                 source_info = f"Analyzing table: **{st.session_state.csv_preview_data['table_name']}**"
                 if st.session_state.csv_preview_data.get('sheet_name'):
@@ -1513,6 +1272,67 @@ def main():
                 placeholder="e.g., What are the top 10 products by revenue? Show me the trend over time."
             )
             
+            # Advanced SQL Features Section
+            with st.expander("🚀 Advanced SQL Features", expanded=False):
+                st.markdown("""
+                **Available Advanced Features:**
+                - **JOINs**: Combine multiple tables
+                - **Window Functions**: Rankings, running totals, moving averages
+                - **CTEs**: Multi-step analysis with temporary results
+                - **Advanced Aggregations**: Subtotals, rollups, conditional sums
+                
+                **Example Questions:**
+                - "Show running total of sales by date"
+                - "Rank customers by purchase amount within each region"
+                - "Calculate 30-day moving average of orders"
+                - "Compare this month's performance to last month"
+                - "Join customer and order tables to show full picture"
+                """)
+                
+                # Show available tables for JOIN operations
+                if len(st.session_state.uploaded_tables) > 1:
+                    st.markdown("**Available tables for JOIN operations:**")
+                    for table in st.session_state.uploaded_tables:
+                        st.write(f"- {table}")
+                    
+                    # Auto-detect JOIN possibilities
+                    if st.button("🔍 Detect JOIN possibilities"):
+                        tables_info = get_table_info(db_path)
+                        if len(tables_info) >= 2:
+                            st.markdown("**Possible JOINs detected:**")
+                            # Simple detection based on column names
+                            for t1 in tables_info:
+                                for t2 in tables_info:
+                                    if t1 != t2:
+                                        common_cols = set(tables_info[t1]['columns']) & set(tables_info[t2]['columns'])
+                                        if common_cols:
+                                            st.info(f"Tables '{t1}' and '{t2}' share columns: {', '.join(common_cols)}")
+                
+                # Show query templates
+                st.markdown("**📝 Query Templates:**")
+                template_options = {
+                    "Running Total": "running_total",
+                    "Ranking": "ranking",
+                    "Moving Average": "moving_average",
+                    "Year-over-Year": "year_over_year",
+                    "Top N per Group": "top_n_per_group",
+                    "Multi-table Analysis": "multi_table_analysis"
+                }
+                
+                selected_template = st.selectbox(
+                    "Choose a template:",
+                    options=["None"] + list(template_options.keys()),
+                    help="Select a query template to see example SQL"
+                )
+                
+                if selected_template != "None":
+                    template_key = template_options[selected_template]
+                    template_code = COMPLEX_QUERY_EXAMPLES.get(template_key, "")
+                    st.code(template_code, language='sql')
+                    
+                    if st.button("Use this template", key="use_template"):
+                        st.info("💡 Adapt this template to your data by updating table and column names in your question!")
+            
             col1_1, col1_2, col1_3 = st.columns([1, 1, 2])
             with col1_1:
                 analyze_button = st.button("🔍 Analyze", type="primary", use_container_width=True)
@@ -1523,357 +1343,518 @@ def main():
             
             if analyze_button:
                 if question:
-                    if use_simple and st.session_state.uploaded_tables:
-                        # Try simple query first
-                        result = execute_simple_query(
-                            question, 
-                            st.session_state.uploaded_tables[0], 
-                            db_path
-                        )
-                        if result:
-                            st.session_state.current_analysis = result
-                            st.success("✅ Query executed successfully!")
-                        else:
-                            st.warning("This question is too complex for simple mode. Using AI analysis...")
-                            use_simple = False
-                    
-                    if not use_simple:
-                        # Use CrewAI analysis
-                        db, _ = get_database_connection()
-                        if db and llm:
+                    with st.spinner("Running analysis..."):
+                        # Get fresh database connection
+                        db, db_path = get_database_connection()
+                        
+                        if db and db_path:
                             # Create tools and agents
                             tools = create_tools(db, db_path)
                             agents = create_agents(tools, llm)
                             
-                            if agents:
-                                with st.spinner("🤖 AI agents analyzing your data..."):
-                                    result = run_analysis(question, agents)
-                                    st.session_state.current_analysis = result
-                                    
-                                    if result['success']:
-                                        st.success("✅ Analysis complete!")
-                                    else:
-                                        st.error("❌ Analysis failed. Check the error message below.")
-                else:
-                    st.warning("Please enter a question to analyze.")
-        
-        with col2:
-            st.header("📊 Available Tables & Schema")
-            
-            if st.session_state.uploaded_tables:
-                # Get detailed table info
-                tables_info = get_table_info(db_path)
-                
-                for table in st.session_state.uploaded_tables:
-                    with st.expander(f"📁 {table}", expanded=True):
-                        if table in tables_info:
-                            info = tables_info[table]
+                            # Progress tracking
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
                             
-                            # Show column categories
-                            if info['numeric_columns']:
-                                st.markdown("**🔢 Numeric columns:**")
-                                st.text(", ".join(info['numeric_columns']))
+                            stages = [
+                                (0.2, "🔌 Connecting to database..."),
+                                (0.4, "🔍 Analyzing tables..."),
+                                (0.6, "✍️ Writing SQL queries..."),
+                                (0.8, "📊 Analyzing results..."),
+                            ]
                             
-                            if info['text_columns']:
-                                st.markdown("**📝 Text columns:**")
-                                st.text(", ".join(info['text_columns']))
+                            for progress, status in stages:
+                                progress_bar.progress(progress)
+                                status_text.text(status)
+                                time.sleep(0.5)
                             
-                            if info['date_columns']:
-                                st.markdown("**📅 Date columns:**")
-                                st.text(", ".join(info['date_columns']))
+                            # Run analysis
+                            result = run_analysis(question, agents)
                             
-                            st.markdown(f"**Total columns:** {len(info['columns'])}")
+                            progress_bar.progress(1.0)
+                            status_text.text("✅ Analysis complete!")
+                            time.sleep(0.5)
+                            
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            st.session_state.current_analysis = result
+                            st.session_state.analysis_history.append(result)
+                            
+                            if 'selected_question' in st.session_state:
+                                del st.session_state.selected_question
                         else:
-                            st.text("Schema information not available")
-            else:
-                st.info("No tables uploaded yet. Upload a CSV or Excel file to get started.")
-        
-        # Display analysis results
-        if st.session_state.current_analysis:
-            st.markdown("---")
-            st.header("📈 Analysis Results")
-            
-            analysis = st.session_state.current_analysis
-            
-            # Show the question
-            st.markdown(f"**Question:** {analysis['question']}")
-            
-            if analysis.get('success', False):
-                # Show SQL queries if any
-                if analysis.get('queries'):
-                    with st.expander("🔍 SQL Queries Used", expanded=True):
-                        for i, query in enumerate(analysis['queries']):
-                            st.code(query, language='sql')
-                            
-                            # Add copy button
-                            if st.button(f"📋 Copy Query {i+1}", key=f"copy_query_{i}"):
-                                st.write("Query copied to clipboard!")
-                                st.session_state.query_history.append({
-                                    'query': query,
-                                    'timestamp': datetime.now(),
-                                    'question': analysis['question']
-                                })
-                
-                # Show the analysis result
-                with st.expander("📊 Analysis Report", expanded=True):
-                    st.markdown(analysis.get('result', 'No result available'))
-                
-                # Show data results if available
-                if st.session_state.query_results:
-                    with st.expander("📋 Query Results Data", expanded=True):
-                        df_result = st.session_state.query_results.get('dataframe')
-                        if df_result is not None and not df_result.empty:
-                            st.dataframe(df_result, use_container_width=True)
-                            
-                            # Download button for results
-                            csv = df_result.to_csv(index=False)
-                            st.download_button(
-                                label="📥 Download Results as CSV",
-                                data=csv,
-                                file_name=f"query_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                mime='text/csv'
-                            )
-            else:
-                # Show error
-                st.error(f"❌ Error: {analysis.get('error', 'Unknown error')}")
+                            st.error("Failed to connect to database")
+                else:
+                    st.warning("⚠️ Please enter a question to analyze.")
     
     with tab3:
-        st.header("📊 Full Analysis Report")
+        st.header("💾 Query & Results")
         
-        if st.session_state.current_analysis and st.session_state.current_analysis.get('success'):
-            analysis = st.session_state.current_analysis
+        # Current query and results FIRST (moved up)
+        if st.session_state.current_analysis and st.session_state.current_analysis.get('success', False):
+            result = st.session_state.current_analysis
             
-            # Report header
-            st.markdown(f"### 📅 Report Generated: {analysis['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-            st.markdown(f"**Question:** {analysis['question']}")
-            
-            # Executive Summary
-            st.markdown("### 📋 Executive Summary")
-            result_text = analysis.get('result', '')
-            
-            # Extract key findings (look for bullet points or numbered lists)
-            lines = result_text.split('\n')
-            summary_lines = []
-            for line in lines:
-                if line.strip().startswith(('•', '-', '*', '1.', '2.', '3.')):
-                    summary_lines.append(line.strip())
-            
-            if summary_lines:
-                for line in summary_lines[:5]:  # Show first 5 key points
-                    st.markdown(f"- {line.lstrip('•-*123. ')}")
-            else:
-                st.info("Run an analysis to see the full report here.")
-            
-            # Detailed Analysis
-            st.markdown("### 🔍 Detailed Analysis")
-            st.markdown(result_text)
-            
-            # Visualizations (if applicable)
-            if st.session_state.query_results and st.session_state.query_results.get('dataframe') is not None:
-                df_result = st.session_state.query_results['dataframe']
+            # Create a prominent section for current query
+            with st.container():
+                st.markdown("### 📝 Current Query")
                 
-                if not df_result.empty:
-                    st.markdown("### 📊 Data Visualizations")
-                    
-                    # Auto-generate appropriate visualizations
-                    numeric_cols = df_result.select_dtypes(include=['int64', 'float64']).columns.tolist()
-                    text_cols = df_result.select_dtypes(include=['object']).columns.tolist()
-                    
-                    if len(df_result) <= 20 and numeric_cols:
-                        # Bar chart for small datasets
-                        if text_cols:
-                            fig = px.bar(df_result, x=text_cols[0], y=numeric_cols[0], 
-                                       title=f"{numeric_cols[0]} by {text_cols[0]}")
-                            st.plotly_chart(fig, use_container_width=True)
-                    
-                    elif len(numeric_cols) >= 2:
-                        # Scatter plot for numeric relationships
-                        fig = px.scatter(df_result, x=numeric_cols[0], y=numeric_cols[1],
-                                       title=f"{numeric_cols[1]} vs {numeric_cols[0]}")
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show data table
-                    st.markdown("### 📋 Result Data")
-                    st.dataframe(df_result, use_container_width=True)
-            
-            # Export options
-            st.markdown("### 💾 Export Report")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Export as text
-                report_text = f"""
-SQL Analysis Report
-Generated: {analysis['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}
-
-Question: {analysis['question']}
-
-Analysis Results:
-{analysis.get('result', '')}
-
-SQL Queries Used:
-{chr(10).join(analysis.get('queries', []))}
-"""
-                st.download_button(
-                    label="📄 Download as Text",
-                    data=report_text,
-                    file_name=f"analysis_report_{analysis['timestamp'].strftime('%Y%m%d_%H%M%S')}.txt",
-                    mime='text/plain'
-                )
-            
-            with col2:
-                # Export as JSON
-                report_json = {
-                    'timestamp': analysis['timestamp'].isoformat(),
-                    'question': analysis['question'],
-                    'result': analysis.get('result', ''),
-                    'queries': analysis.get('queries', []),
-                    'success': analysis.get('success', False)
-                }
-                st.download_button(
-                    label="📊 Download as JSON",
-                    data=json.dumps(report_json, indent=2),
-                    file_name=f"analysis_report_{analysis['timestamp'].strftime('%Y%m%d_%H%M%S')}.json",
-                    mime='application/json'
-                )
-        else:
-            st.info("No analysis report available. Run an analysis in the Analysis tab to generate a report.")
-    
-    with tab4:
-        st.header("💾 Query History & Results")
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.subheader("📜 Query History")
-            
-            if st.session_state.query_history:
-                for i, item in enumerate(reversed(st.session_state.query_history[-10:])):  # Show last 10
-                    with st.expander(f"Query {len(st.session_state.query_history) - i}: {item['timestamp'].strftime('%H:%M:%S')}"):
-                        st.code(item['query'], language='sql')
-                        if 'question' in item:
-                            st.markdown(f"**Question:** {item['question']}")
+                # Display query in a more visible way
+                if result.get('queries'):
+                    for i, query in enumerate(result['queries'], 1):
+                        if len(result['queries']) > 1:
+                            st.markdown(f"**Query {i}:**")
                         
-                        # Re-run button
-                        if st.button(f"🔄 Re-run", key=f"rerun_{i}"):
-                            try:
-                                conn = sqlite3.connect(db_path)
-                                df = pd.read_sql_query(item['query'], conn)
-                                conn.close()
-                                
-                                st.session_state.query_results = {
-                                    'query': item['query'],
-                                    'dataframe': df,
-                                    'text_result': df.to_string(),
-                                    'timestamp': datetime.now()
-                                }
-                                st.success("Query re-executed!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error: {str(e)}")
-            else:
-                st.info("No queries executed yet.")
-        
-        with col2:
-            st.subheader("📊 Current Results")
+                        # Check query complexity
+                        complexity, indicators = monitor_query_complexity(query)
+                        if complexity == "high":
+                            st.markdown(f"<div class='complex-query-box'>⚡ Complex Query (JOINs: {indicators['joins']}, Window Functions: {indicators['window_functions']}, CTEs: {indicators['ctes']})</div>", unsafe_allow_html=True)
+                        
+                        # Display query in a code block for better visibility
+                        st.code(query, language='sql')
+                elif st.session_state.query_results:
+                    # Display current query in code block
+                    st.code(st.session_state.query_results['query'], language='sql')
+                
+                # Show results in a compact way
+                st.markdown("### 📊 Results")
+                if st.session_state.query_results and st.session_state.query_results['dataframe'] is not None:
+                    df = st.session_state.query_results['dataframe']
+                    
+                    # Add to history (hidden logic)
+                    current_query = st.session_state.query_results['query']
+                    current_timestamp = st.session_state.query_results['timestamp']
+                    
+                    existing_index = None
+                    for i, item in enumerate(st.session_state.query_history):
+                        if item['query'] == current_query:
+                            existing_index = i
+                            break
+                    
+                    if existing_index is not None:
+                        st.session_state.query_history[existing_index] = {
+                            'timestamp': current_timestamp,
+                            'query': current_query,
+                            'dataframe': df.copy(),
+                            'result_text': st.session_state.query_results.get('text_result', ''),
+                            'complexity': st.session_state.query_results.get('complexity', 'low')
+                        }
+                    else:
+                        st.session_state.query_history.append({
+                            'timestamp': current_timestamp,
+                            'query': current_query,
+                            'dataframe': df.copy(),
+                            'result_text': st.session_state.query_results.get('text_result', ''),
+                            'complexity': st.session_state.query_results.get('complexity', 'low')
+                        })
+                    
+                    # Display results based on size
+                    if len(df) == 1 and len(df.columns) == 1:
+                        # Single value - show as metric with formatting
+                        value = df.iloc[0, 0]
+                        formatted_value = format_numeric_value(value)
+                        st.metric("Result", formatted_value)
+                    elif len(df) <= 10:
+                        # Small dataset - show full table with formatted numbers
+                        # Format numeric columns
+                        df_display = df.copy()
+                        for col in df_display.select_dtypes(include=['float64']).columns:
+                            df_display[col] = df_display[col].apply(format_numeric_value)
+                        st.dataframe(df_display, use_container_width=True, hide_index=True)
+                    else:
+                        # Large dataset - show preview with info
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.info(f"Showing first 10 rows of {len(df)} total rows")
+                        with col2:
+                            st.metric("Total Rows", f"{len(df):,}")
+                        
+                        # Show preview with formatted numbers
+                        df_display = df.head(10).copy()
+                        for col in df_display.select_dtypes(include=['float64']).columns:
+                            df_display[col] = df_display[col].apply(format_numeric_value)
+                        st.dataframe(df_display, use_container_width=True, hide_index=True)
+                    
+                    # Action buttons
+                    col1, col2, col3 = st.columns([1, 1, 2])
+                    with col1:
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download CSV",
+                            data=csv,
+                            file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    with col2:
+                        if st.button("🧹 Clear", key="clear_current_query", use_container_width=True):
+                            st.session_state.current_analysis = None
+                            st.session_state.query_results = None
+                            st.rerun()
+                        
+                elif st.session_state.query_results:
+                    # Text results only
+                    st.text_area("Results", st.session_state.query_results['text_result'], height=150, disabled=True)
             
-            if st.session_state.query_results:
-                results = st.session_state.query_results
-                
-                st.markdown(f"**Last Updated:** {results['timestamp'].strftime('%H:%M:%S')}")
-                st.code(results['query'], language='sql')
-                
-                df = results.get('dataframe')
-                if df is not None and not df.empty:
-                    st.markdown(f"**Result:** {len(df)} rows × {len(df.columns)} columns")
-                    
-                    # Quick stats
-                    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-                    if len(numeric_cols) > 0:
-                        st.markdown("**Quick Stats:**")
-                        for col in numeric_cols[:3]:  # First 3 numeric columns
-                            col_stats = f"- {col}: min={df[col].min():.2f}, max={df[col].max():.2f}, avg={df[col].mean():.2f}"
-                            st.text(col_stats)
-                    
-                    # Show sample data
-                    st.markdown("**Sample Data:**")
-                    st.dataframe(df.head(10), use_container_width=True)
+            st.divider()
+        
+        # Query History section (moved down)
+        with st.container():
+            # History header with controls
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.markdown("### 📜 Query History")
+            with col2:
+                dedupe = st.checkbox("Deduplicate", value=True, help="Keep only the latest execution of each unique query")
+            with col3:
+                if st.session_state.query_history:
+                    if st.button("🗑️ Clear History", use_container_width=True):
+                        st.session_state.query_history = []
+                        st.rerun()
+            
+            # Show query history
+            if st.session_state.query_history:
+                # Prepare history data
+                if dedupe:
+                    seen_queries = {}
+                    for item in st.session_state.query_history:
+                        query_key = item['query']
+                        if query_key not in seen_queries or item['timestamp'] > seen_queries[query_key]['timestamp']:
+                            seen_queries[query_key] = item
+                    history_items = list(seen_queries.values())
+                    history_items.sort(key=lambda x: x['timestamp'], reverse=True)
                 else:
-                    st.info("No data in results.")
+                    history_items = st.session_state.query_history[::-1]
+                
+                # Create history dataframe with full queries
+                history_data = []
+                for item in history_items:
+                    result_str = "N/A"
+                    if 'dataframe' in item and item['dataframe'] is not None:
+                        df = item['dataframe']
+                        if len(df) == 1 and len(df.columns) == 1:
+                            # Format single value results
+                            value = df.iloc[0, 0]
+                            result_str = str(format_numeric_value(value))
+                        elif len(df) <= 3:
+                            result_str = df.to_string(index=False, max_cols=3)
+                            if len(result_str) > 100:
+                                result_str = result_str[:100] + "..."
+                        else:
+                            result_str = f"{len(df)} rows × {len(df.columns)} columns"
+                    elif 'result_text' in item:
+                        result_str = str(item['result_text'])[:100] + "..." if len(str(item['result_text'])) > 100 else str(item['result_text'])
+                    
+                    # Add complexity indicator
+                    complexity = item.get('complexity', 'low')
+                    complexity_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(complexity, "🟢")
+                    
+                    history_data.append({
+                        'Time': item['timestamp'].strftime('%H:%M:%S'),
+                        'Complexity': complexity_icon,
+                        'Query': item['query'],  # Full query, no truncation
+                        'Result': result_str
+                    })
+                
+                if history_data:
+                    history_df = pd.DataFrame(history_data)
+                    
+                    # Compact history display
+                    with st.expander(f"📋 View History ({len(history_data)} queries)", expanded=True):
+                        # Info about deduplication
+                        if dedupe and len(history_items) < len(st.session_state.query_history):
+                            st.caption(f"Showing {len(history_items)} unique queries from {len(st.session_state.query_history)} total executions")
+                        
+                        st.caption("🟢 Simple | 🟡 Medium | 🔴 Complex")
+                        
+                        # Show history table with full queries
+                        st.dataframe(
+                            history_df,
+                            use_container_width=True,
+                            height=250,
+                            column_config={
+                                "Time": st.column_config.TextColumn("Time", width="small"),
+                                "Complexity": st.column_config.TextColumn("", width="small"),
+                                "Query": st.column_config.TextColumn("Query", width="large"),
+                                "Result": st.column_config.TextColumn("Result", width="medium")
+                            },
+                            hide_index=True
+                        )
+                        
+                        # Download option
+                        if st.button("💾 Download Full History", key="download_history_btn"):
+                            full_history = []
+                            for item in st.session_state.query_history:
+                                history_item = {
+                                    'Timestamp': item['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
+                                    'Query': item['query'],
+                                    'Complexity': item.get('complexity', 'low')
+                                }
+                                
+                                if 'dataframe' in item and item['dataframe'] is not None:
+                                    history_item['Result'] = item['dataframe'].to_dict('records')
+                                elif 'result_text' in item:
+                                    history_item['Result'] = item['result_text']
+                                else:
+                                    history_item['Result'] = 'N/A'
+                                
+                                full_history.append(history_item)
+                            
+                            history_json = json.dumps(full_history, indent=2, default=str)
+                            st.download_button(
+                                label="💾 Save as JSON",
+                                data=history_json,
+                                file_name=f"query_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                                mime="application/json"
+                            )
             else:
-                st.info("No query results to display.")
-    
-    # Sidebar information
-    with st.sidebar:
-        st.header("ℹ️ Information")
+                st.info("ℹ️ No queries executed yet. Run an analysis to see queries here.")
         
-        # Session info
-        st.markdown("### 📊 Session Info")
-        st.info(f"Session ID: {st.session_state.session_id}")
-        st.info(f"Tables loaded: {len(st.session_state.uploaded_tables)}")
-        
-        if st.session_state.llm_type == "groq":
-            st.warning(f"API calls made: {st.session_state.api_calls}")
-        
-        # Help section
-        st.markdown("### 🤝 How to Use")
-        st.markdown("""
-        1. **Upload Data**: Upload CSV or Excel files
-        2. **Load to Database**: Give your table a name
-        3. **Ask Questions**: Use natural language
-        4. **View Results**: Check analysis and SQL queries
-        """)
-        
-        # Example questions
-        st.markdown("### 💡 Example Questions")
-        example_questions = [
-            "Show me the top 10 rows",
-            "What is the average value by category?",
-            "Find all records where amount > 1000",
-            "Calculate the monthly trend",
-            "Compare this year vs last year"
-        ]
-        
-        for q in example_questions:
-            if st.button(q, key=f"example_{q}", use_container_width=True):
-                st.session_state.selected_question = q
-        
-        # Advanced options
-        with st.expander("⚙️ Advanced Options"):
-            if st.button("🗑️ Clear All Data"):
-                if st.button("⚠️ Confirm Clear All", key="confirm_clear"):
-                    # Clear database
-                    conn = sqlite3.connect(db_path)
-                    for table in st.session_state.uploaded_tables:
-                        conn.execute(f"DROP TABLE IF EXISTS {table}")
-                    conn.commit()
-                    conn.close()
-                    
-                    # Reset session state
-                    st.session_state.uploaded_tables = []
-                    st.session_state.current_analysis = None
-                    st.session_state.query_results = None
-                    st.session_state.csv_preview_data = None
-                    st.session_state.query_history = []
-                    st.session_state.analysis_history = []
-                    
-                    st.success("All data cleared!")
-                    st.rerun()
-            
-            # Database download
-            if st.session_state.uploaded_tables:
-                with open(db_path, 'rb') as f:
-                    st.download_button(
-                        label="💾 Download Database",
-                        data=f.read(),
-                        file_name=f"session_{st.session_state.session_id}.db",
-                        mime='application/octet-stream'
-                    )
-        
-        # Footer
-        st.markdown("---")
-        st.markdown("Made with ❤️ using CrewAI & Streamlit")
+        # If no current analysis
+        if not (st.session_state.current_analysis and st.session_state.current_analysis.get('success', False)):
+            st.info("ℹ️ Run an analysis to see current query and results")
 
-# Run the main function
+# Helper functions
+def get_database_stats(db_path):
+    """Get database statistics"""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        
+        stats = {
+            'tables': [],
+            'total_tables': len(tables),
+            'total_rows': 0
+        }
+        
+        for table in tables:
+            table_name = table[0]
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cursor.fetchone()[0]
+            stats['tables'].append({'name': table_name, 'rows': count})
+            stats['total_rows'] += count
+        
+        conn.close()
+        return stats
+    except Exception as e:
+        st.error(f"Error getting database stats: {str(e)}")
+        return None
+
+def extract_sql_queries(text):
+    """Extract SQL queries from the analysis text"""
+    patterns = [
+        r"```sql\n(.*?)\n```",
+        r"```\n(SELECT.*?)\n```",
+        r"Query:\s*(SELECT.*?)(?:\n|$)",
+        r"(SELECT\s+.*?(?:;|$))",
+        r"(WITH\s+.*?SELECT\s+.*?(?:;|$))",  # Added pattern for CTEs
+    ]
+    
+    queries = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+        for match in matches:
+            query = match.strip()
+            if query and not any(query == q for q in queries):
+                queries.append(query)
+    
+    return queries
+
+def run_analysis(question, agents):
+    """Run analysis with provided agents"""
+    st.session_state.executed_queries = []
+    
+    try:
+        sql_specialist, data_analyst = agents
+        
+        # Create tasks
+        data_extraction = Task(
+            description=f"""
+            Extract data to answer: {question}
+            
+            IMPORTANT: 
+            1. First list ALL available tables to see what's in the database
+            2. The data comes from CSV or Excel files uploaded by the user
+            3. Available tables: {', '.join(st.session_state.uploaded_tables)}
+            4. Make sure to query the correct table that contains the data for this question
+            5. Show the exact SQL query you're executing
+            6. Use advanced SQL features when appropriate (JOINs, Window Functions, CTEs)
+            7. For complex questions, break them down using CTEs
+            """,
+            expected_output="SQL query results with the query used",
+            agent=sql_specialist
+        )
+        
+        data_analysis = Task(
+            description=f"""
+            Analyze the data for: {question}
+            
+            Provide insights based on the actual data returned from the uploaded file.
+            Look for patterns, trends, and interesting findings.
+            If the query used advanced SQL features, explain the insights they revealed.
+            """,
+            expected_output="Detailed analysis with insights",
+            agent=data_analyst
+        )
+        
+        
+        # Create and run crew
+        crew = Crew(
+            agents=[sql_specialist, data_analyst],
+            tasks=[data_extraction, data_analysis],
+            process=Process.sequential,
+            verbose=0
+        )
+        
+        result = crew.kickoff()
+        queries = extract_sql_queries(result)
+        
+        return {
+            "success": True,
+            "question": question,
+            "timestamp": datetime.now(),
+            "result": result,
+            "queries": queries
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "question": question,
+            "timestamp": datetime.now()
+        }
+
+# Sidebar
+with st.sidebar:
+    st.header("🤖 CrewAI SQL Agent")
+    
+    st.divider()
+    
+    # Session info
+    st.subheader("📊 Session Info")
+    st.info(f"Session: {st.session_state.session_id}")
+    
+    # Clear all data button
+    if st.button("🗑️ Clear All Data", use_container_width=True):
+        try:
+            # Get fresh connection
+            db, db_path = get_database_connection()
+            if db_path:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                
+                # Get all tables
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = cursor.fetchall()
+                
+                # Drop each table
+                for table in tables:
+                    cursor.execute(f"DROP TABLE IF EXISTS {table[0]}")
+                
+                conn.commit()
+                conn.close()
+            
+            # Clear session state
+            st.session_state.uploaded_tables = []
+            st.session_state.csv_preview_data = None
+            st.session_state.current_analysis = None
+            st.session_state.query_results = None
+            st.session_state.query_history = []
+            st.success("✅ All data cleared!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error clearing data: {str(e)}")
+    
+    st.divider()
+    
+    # Show uploaded tables
+    if st.session_state.uploaded_tables:
+        st.subheader("📁 Uploaded Tables")
+        for table in st.session_state.uploaded_tables[-5:]:
+            st.success(f"📊 {table}")
+        if len(st.session_state.uploaded_tables) > 5:
+            st.info(f"...and {len(st.session_state.uploaded_tables) - 5} more")
+    else:
+        st.info("📭 No tables uploaded yet")
+    
+    st.divider()
+    
+    # SQL Features
+    st.subheader("🚀 SQL Features")
+    st.markdown("""
+    **Supported Operations:**
+    - ✅ Basic queries
+    - ✅ JOINs (all types)
+    - ✅ Window functions
+    - ✅ CTEs
+    - ✅ Advanced aggregations
+    - ✅ Date/time operations
+    """)
+    
+    st.divider()
+    
+    # Help section
+    with st.expander("❓ Help", expanded=False):
+        st.markdown("""
+        **How to use:**
+        
+        1. **Upload File**: Go to Data Upload tab
+        2. **Choose Format**: CSV or Excel files supported
+        3. **Select Sheet**: For Excel files with multiple sheets
+        4. **Preview**: Check your data before loading
+        5. **Load**: Give your table a meaningful name
+        6. **Ask Questions**: Use suggested questions or write your own
+        7. **View Results**: Check the Query & Results tab
+        
+        **Advanced SQL Tips:**
+        - Use "running total" for cumulative calculations
+        - Use "rank by" for ordering within groups
+        - Use "join" to combine multiple tables
+        - Use "moving average" for trend analysis
+        - Use "compare" for period-over-period analysis
+        
+        **Tips:**
+        - Supports CSV and Excel (XLS, XLSX) files
+        - Empty files are automatically rejected
+        - Column names are cleaned automatically
+        - All data is temporary (session-based)
+        - Use descriptive table names
+        - Try the suggested questions first
+        - You can upload multiple files
+        
+        **Common Questions:**
+        - Show trends over time
+        - Find top/bottom performers
+        - Calculate averages and totals
+        - Group by categories
+        - Compare different segments
+        - Rank within groups
+        - Calculate running totals
+        - Join multiple tables
+        """)
+    
+    st.divider()
+    
+    # Footer
+    st.caption("Made with ❤️ using Streamlit & CrewAI")
+
+# Clean up temporary database on app close
+import atexit
+
+def cleanup():
+    """Clean up temporary database file"""
+    if 'temp_db_path' in st.session_state:
+        try:
+            os.unlink(st.session_state.temp_db_path)
+        except:
+            pass
+
+atexit.register(cleanup)
+
+# Run the app
 if __name__ == "__main__":
     main()
