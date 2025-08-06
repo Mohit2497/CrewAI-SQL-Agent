@@ -11,3 +11,4 @@ numpy
 pysqlite3-binary
 openpyxl
 xlrd
+langchain-community
