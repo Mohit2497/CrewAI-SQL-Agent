@@ -1,6 +1,6 @@
 # CrewAI SQL Agent
 
-An AI-powered SQL agent system that enables natural language database queries using CrewAI, LangChain, and Streamlit. Upload CSV files and ask questions in plain English to get SQL queries, data analysis, and business insights.
+An AI-powered SQL agent system that enables natural language database queries using CrewAI, LangChain, and Streamlit. Upload CSV files and ask questions in plain English to get SQL queries.
 
 ## Features
 
@@ -8,6 +8,7 @@ An AI-powered SQL agent system that enables natural language database queries us
 - **CSV Upload & Analysis**: Upload CSV files directly through the web interface
 - **Intelligent Query Generation**: AI agents write optimized SQL queries
 - **Query History**: Track all queries with deduplication and export options
+- **Intelligent Data Validation**: Comprehensive file validation with warnings and suggestions
 - **Interactive Results**: View query results in tables with export to CSV
 - **Multi-Agent System**: Specialized agents for SQL, analysis, and business strategy
 
