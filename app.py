@@ -33,41 +33,140 @@ from langchain_groq import ChatGroq
 # Load environment variables
 load_dotenv()
 
-# Page configuration
+# Page configuration - Force sidebar to be visible
 st.set_page_config(
     page_title="CrewAI SQL Agent",
     page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded"  # This should show sidebar by default
 )
+
+# Force sidebar to be visible on load
+if "sidebar_state" not in st.session_state:
+    st.session_state.sidebar_state = "expanded"
 
 # Custom CSS
 st.markdown("""
 <style>
+    /* Clean, minimalistic design */
     .stProgress > div > div > div > div {
         background-color: #1f77b4;
     }
-    .upload-section {
-        background-color: #f0f8ff;
-        padding: 2rem;
-        border-radius: 10px;
-        border: 2px dashed #1f77b4;
-        margin: 1rem 0;
+    
+    /* Force sidebar to be visible */
+    section[data-testid="stSidebar"] {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 20rem !important;
+        min-width: 20rem !important;
+        max-width: 20rem !important;
     }
+    
+    /* Make sure sidebar toggle button is visible */
+    button[kind="header"] {
+        display: block !important;
+    }
+    
+    /* Ensure main content doesn't overlap sidebar */
+    .main .block-container {
+        max-width: calc(100% - 22rem);
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    
+    /* Cleaner file uploader */
+    .uploadedFile {
+        border: 2px dashed #e0e0e0 !important;
+        border-radius: 8px !important;
+        padding: 1.5rem !important;
+        background-color: #fafafa !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .uploadedFile:hover {
+        border-color: #1f77b4 !important;
+        background-color: #f0f8ff !important;
+    }
+    
+    /* Success message styling */
     .success-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
+        padding: 0.75rem;
+        border-radius: 6px;
         background-color: #d4edda;
         border: 1px solid #c3e6cb;
         color: #155724;
-        margin: 1rem 0;
+        margin: 0.5rem 0;
     }
-    .uploadedFile {
-        border: 2px dashed #1f77b4 !important;
-        border-radius: 10px !important;
-        padding: 20px !important;
-        background-color: #f0f8ff !important;
+    
+    /* Metric cards */
+    [data-testid="metric-container"] {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        padding: 0.75rem;
+        border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }
+    
+    /* Clean button styling */
+    .stButton > button {
+        border-radius: 6px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    
+    /* Tabs styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 6px 6px 0 0;
+        padding: 0.5rem 1rem;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        border-radius: 6px;
+        background-color: #f8f9fa;
+    }
+    
+    /* Input field styling */
+    .stTextInput > div > div > input {
+        border-radius: 6px;
+    }
+    
+    /* Remove excessive spacing */
+    .block-container {
+        padding-top: 2rem;
+    }
+    
+    /* Clean divider */
+    hr {
+        margin: 1.5rem 0;
+        border: 0;
+        border-top: 1px solid #e9ecef;
+    }
+    
+    /* Info boxes */
+    .stAlert {
+        border-radius: 6px;
+    }
+    
+    /* DataFrame styling */
+    .dataframe {
+        font-size: 0.9rem;
+    }
+    
+    /* Hide Streamlit branding for cleaner look */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
     .complex-query-box {
         background-color: #f8f9fa;
         border-left: 4px solid #1f77b4;
@@ -98,6 +197,10 @@ if 'temp_db_path' not in st.session_state:
     temp_file = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
     st.session_state.temp_db_path = temp_file.name
     temp_file.close()
+if 'current_validation' not in st.session_state:
+    st.session_state.current_validation = None
+if 'current_file_info' not in st.session_state:
+    st.session_state.current_file_info = None
 
 # SQL Query Builder Helpers
 class AdvancedQueryBuilder:
@@ -382,13 +485,8 @@ def display_validation_results(validation_results):
             st.error(f"❌ {error}")
         return False
     
-    # Display warnings
-    for warning in validation_results['warnings']:
-        st.warning(f"⚠️ {warning}")
-    
-    # Display info messages
-    for info in validation_results['info']:
-        st.info(f"ℹ️ {info}")
+    # Store validation in session state for sidebar display
+    st.session_state.current_validation = validation_results
     
     return True
 
@@ -921,7 +1019,6 @@ def create_agents(tools, llm):
         llm=llm
     )
 
-
     return [sql_specialist, data_analyst]
 
 # Format numeric value helper
@@ -935,8 +1032,139 @@ def format_numeric_value(value):
             return value
     return value
 
+# Helper functions
+def get_database_stats(db_path):
+    """Get database statistics"""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        
+        stats = {
+            'tables': [],
+            'total_tables': len(tables),
+            'total_rows': 0
+        }
+        
+        for table in tables:
+            table_name = table[0]
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cursor.fetchone()[0]
+            stats['tables'].append({'name': table_name, 'rows': count})
+            stats['total_rows'] += count
+        
+        conn.close()
+        return stats
+    except Exception as e:
+        st.error(f"Error getting database stats: {str(e)}")
+        return None
+
+def extract_sql_queries(text):
+    """Extract SQL queries from the analysis text"""
+    patterns = [
+        r"```sql\n(.*?)\n```",
+        r"```\n(SELECT.*?)\n```",
+        r"Query:\s*(SELECT.*?)(?:\n|$)",
+        r"(SELECT\s+.*?(?:;|$))",
+        r"(WITH\s+.*?SELECT\s+.*?(?:;|$))",  # Added pattern for CTEs
+    ]
+    
+    queries = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+        for match in matches:
+            query = match.strip()
+            if query and not any(query == q for q in queries):
+                queries.append(query)
+    
+    return queries
+
+def run_analysis(question, agents):
+    """Run analysis with provided agents"""
+    st.session_state.executed_queries = []
+    
+    try:
+        sql_specialist, data_analyst = agents
+        
+        # Create tasks
+        data_extraction = Task(
+            description=f"""
+            Extract data to answer: {question}
+            
+            IMPORTANT: 
+            1. First list ALL available tables to see what's in the database
+            2. The data comes from CSV or Excel files uploaded by the user
+            3. Available tables: {', '.join(st.session_state.uploaded_tables)}
+            4. Make sure to query the correct table that contains the data for this question
+            5. Show the exact SQL query you're executing
+            6. Use advanced SQL features when appropriate (JOINs, Window Functions, CTEs)
+            7. For complex questions, break them down using CTEs
+            """,
+            expected_output="SQL query results with the query used",
+            agent=sql_specialist
+        )
+        
+        data_analysis = Task(
+            description=f"""
+            Analyze the data for: {question}
+            
+            Provide insights based on the actual data returned from the uploaded file.
+            Look for patterns, trends, and interesting findings.
+            If the query used advanced SQL features, explain the insights they revealed.
+            """,
+            expected_output="Detailed analysis with insights",
+            agent=data_analyst
+        )
+        
+        
+        # Create and run crew
+        crew = Crew(
+            agents=[sql_specialist, data_analyst],
+            tasks=[data_extraction, data_analysis],
+            process=Process.sequential,
+            verbose=0
+        )
+        
+        result = crew.kickoff()
+        queries = extract_sql_queries(result)
+        
+        return {
+            "success": True,
+            "question": question,
+            "timestamp": datetime.now(),
+            "result": result,
+            "queries": queries
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "question": question,
+            "timestamp": datetime.now()
+        }
+
 # Main UI
 def main():
+    # Force sidebar to expand on Hugging Face Spaces
+    st.markdown(
+        """
+        <script>
+        // Wait for Streamlit to load
+        setTimeout(function() {
+            // Find and click the sidebar toggle if sidebar is collapsed
+            const toggleButton = document.querySelector('[data-testid="collapsedControl"]');
+            if (toggleButton) {
+                toggleButton.click();
+            }
+        }, 1000);
+        </script>
+        """,
+        unsafe_allow_html=True
+    )
+    
     # Initialize system
     llm = initialize_llm()
     
@@ -963,291 +1191,172 @@ def main():
         st.title("🤖 CrewAI SQL Agent")
         st.markdown("### Upload CSV or Excel files and ask questions about your data")
     
-    # Check if any data is uploaded
-    if not st.session_state.uploaded_tables:
-        st.info("👋 Welcome! Start by uploading a CSV or Excel file in the 'Data Upload' tab.")
-    else:
-        st.success(f"✅ Ready to analyze {len(st.session_state.uploaded_tables)} table(s)")
-    
-    # Create tabs
+    # Create tabs (removed Summary tab)
     tab1, tab2, tab3 = st.tabs([
         "📤 Data Upload", 
         "🔍 Analysis",  
         "💾 Query & Results"
     ])
     
+    # Variables to store current file data
+    uploaded_file = None
+    df = None
+    
     with tab1:
-        st.header("Upload and Preview Data Files")
+        # Clean header without redundancy
+        st.markdown("### 📤 Upload Your Data")
+        st.markdown("Upload CSV or Excel files to start analyzing your data")
         
-        # Upload section with better styling
-        with st.container():
-            uploaded_file = st.file_uploader(
-                "Choose a CSV or Excel file",
-                type=['csv', 'xlsx', 'xls'],
-                help="Upload a CSV or Excel file to analyze. The file will be loaded into a temporary database for this session."
-            )
+        # File uploader with cleaner styling
+        uploaded_file = st.file_uploader(
+            "",  # Empty label since we have the header above
+            type=['csv', 'xlsx', 'xls'],
+            help="Supported formats: CSV, Excel (XLS, XLSX) • Max size: 200MB",
+            label_visibility="collapsed"
+        )
         
         if uploaded_file is not None:
-            # Show file info
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📄 File Name", uploaded_file.name)
-            with col2:
+            # Process file
+            df = None
+            sheet_name = None
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            # Excel file handling
+            if file_extension in ['xlsx', 'xls']:
+                excel_info = get_excel_info(uploaded_file)
+                if excel_info and excel_info['num_sheets'] > 1:
+                    # Sheet selection in a compact way
+                    st.markdown("**Select a sheet:**")
+                    sheet_name = st.selectbox(
+                        "",
+                        excel_info['sheets'],
+                        label_visibility="collapsed",
+                        help=f"Found {excel_info['num_sheets']} sheets"
+                    )
+                    df, _ = process_excel_upload(uploaded_file)
+                else:
+                    df, sheet_name = process_excel_upload(uploaded_file)
+            else:
+                df = process_csv_upload(uploaded_file)
+            
+            if df is not None:
+                # Store file info for sidebar
                 file_size = uploaded_file.size
-                if file_size < 1024:
-                    size_str = f"{file_size} B"
-                elif file_size < 1024 * 1024:
+                if file_size < 1024 * 1024:
                     size_str = f"{file_size / 1024:.1f} KB"
                 else:
                     size_str = f"{file_size / (1024 * 1024):.1f} MB"
-                st.metric("📦 File Size", size_str)
-            with col3:
-                file_extension = uploaded_file.name.split('.')[-1].upper()
-                st.metric("📋 File Type", file_extension)
-            with col4:
-                # For Excel files, show number of sheets
-                if file_extension.lower() in ['xlsx', 'xls']:
-                    excel_info = get_excel_info(uploaded_file)
-                    if excel_info:
-                        st.metric("📑 Sheets", excel_info['num_sheets'])
-            
-            # Add a file size warning for very large files
-            if file_size > 50 * 1024 * 1024:  # 50MB
-                st.warning("⚠️ Large file detected. Processing might take longer.")
-            
-            # Special handling for Excel files with multiple sheets
-            sheet_name = None
-            if file_extension.lower() in ['xlsx', 'xls']:
-                excel_info = get_excel_info(uploaded_file)
-                if excel_info and excel_info['num_sheets'] > 1:
-                    st.markdown("### 📑 Excel File Details")
-                    
-                    # Show sheet information
-                    with st.expander("View sheet information", expanded=True):
-                        for sheet, details in excel_info['sheet_details'].items():
-                            if 'error' not in details:
-                                st.info(f"**{sheet}**: {details['columns']} columns")
-                            else:
-                                st.warning(f"**{sheet}**: Could not read")
-            
-            # Process the file
-            if file_extension.lower() == 'csv':
-                df = process_csv_upload(uploaded_file)
-                sheet_name = None
-            elif file_extension.lower() in ['xlsx', 'xls']:
-                df, sheet_name = process_excel_upload(uploaded_file)
-            else:
-                st.error(f"❌ Unsupported file type: {file_extension}")
-                df = None
-            
-            if df is not None:
-                # Success message
-                if sheet_name:
-                    st.success(f"✅ Successfully loaded '{sheet_name}' from {uploaded_file.name}")
-                else:
-                    st.success(f"✅ Successfully loaded {uploaded_file.name}")
                 
-                # Preview section
+                numeric_cols = len(df.select_dtypes(include=['int64', 'float64']).columns)
+                text_cols = len(df.select_dtypes(include=['object']).columns)
+                null_pct = (df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100) if len(df) > 0 else 0
+                
+                st.session_state.current_file_info = {
+                    'name': uploaded_file.name,
+                    'size': size_str,
+                    'type': uploaded_file.name.split('.')[-1].upper(),
+                    'df_info': {
+                        'rows': len(df),
+                        'columns': len(df.columns),
+                        'numeric_cols': numeric_cols,
+                        'text_cols': text_cols,
+                        'missing_pct': null_pct
+                    }
+                }
+                
+                # Preview only (removed Quick Stats tab)
                 st.markdown("### 📊 Data Preview")
                 
-                # Basic info in a colored container
-                with st.container():
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Rows", f"{len(df):,}")
-                    with col2:
-                        st.metric("Columns", len(df.columns))
-                    with col3:
-                        st.metric("Memory", f"{df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-                    with col4:
-                        null_count = df.isnull().sum().sum()
-                        st.metric("Missing Values", f"{null_count:,}")
+                # Show first 5 rows in a clean table
+                st.dataframe(
+                    df.head(5), 
+                    use_container_width=True,
+                    hide_index=True,
+                    height=200
+                )
+                if len(df) > 5:
+                    st.caption(f"Showing 5 of {len(df):,} rows")
                 
-                # Create tabs for different views
-                preview_tab1, preview_tab2, preview_tab3 = st.tabs(["📋 Sample Data", "🔍 Data Types", "📊 Quick Stats"])
+                # Load to database section - simplified
+                st.markdown("---")
                 
-                with preview_tab1:
-                    st.markdown("#### First 10 Rows")
-                    st.dataframe(
-                        df.head(10), 
-                        use_container_width=True,
-                        height=400
+                # Initialize session state for table name if not exists
+                if 'pending_table_name' not in st.session_state:
+                    st.session_state.pending_table_name = suggest_table_name(
+                        f"{uploaded_file.name.split('.')[0]}_{sheet_name}" if sheet_name 
+                        else uploaded_file.name
                     )
                 
-                with preview_tab2:
-                    st.markdown("#### Column Information")
-                    # Create detailed column info
-                    col_info = []
-                    for col in df.columns:
-                        col_data = {
-                            'Column Name': col,
-                            'Data Type': str(df[col].dtype),
-                            'Non-Null Count': df[col].count(),
-                            'Null Count': df[col].isnull().sum(),
-                            'Null %': f"{(df[col].isnull().sum() / len(df) * 100):.1f}%",
-                            'Unique Values': df[col].nunique(),
-                            'Unique %': f"{(df[col].nunique() / len(df) * 100):.1f}%"
-                        }
-                        
-                        # Add sample values for each column
-                        if df[col].dtype in ['int64', 'float64']:
-                            col_data['Min'] = df[col].min()
-                            col_data['Max'] = df[col].max()
-                            col_data['Mean'] = round(df[col].mean(), 2) if df[col].dtype == 'float64' else df[col].mean()
-                        else:
-                            # For text columns, show most common values
-                            top_values = df[col].value_counts().head(3)
-                            if len(top_values) > 0:
-                                col_data['Top Values'] = ', '.join([f"{val} ({count})" for val, count in top_values.items()])
-                        
-                        col_info.append(col_data)
-                    
-                    col_info_df = pd.DataFrame(col_info)
-                    
-                    # Display based on data type
-                    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-                    text_cols = df.select_dtypes(include=['object']).columns.tolist()
-                    
-                    if numeric_cols:
-                        st.markdown("##### 🔢 Numeric Columns")
-                        numeric_info = col_info_df[col_info_df['Column Name'].isin(numeric_cols)]
-                        numeric_display_cols = ['Column Name', 'Data Type', 'Non-Null Count', 'Null %', 'Min', 'Max', 'Mean']
-                        st.dataframe(
-                            numeric_info[numeric_display_cols], 
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                    
-                    if text_cols:
-                        st.markdown("##### 📝 Text Columns")
-                        text_info = col_info_df[col_info_df['Column Name'].isin(text_cols)]
-                        text_display_cols = ['Column Name', 'Data Type', 'Non-Null Count', 'Null %', 'Unique Values']
-                        st.dataframe(
-                            text_info[text_display_cols], 
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                
-                with preview_tab3:
-                    st.markdown("#### Quick Statistics")
-                    
-                    # Numeric statistics
-                    numeric_df = df.select_dtypes(include=['int64', 'float64'])
-                    if not numeric_df.empty:
-                        st.markdown("##### 🔢 Numeric Column Statistics")
-                        st.dataframe(
-                            numeric_df.describe().round(2),
-                            use_container_width=True
-                        )
-                    
-                    # Categorical statistics
-                    text_df = df.select_dtypes(include=['object'])
-                    if not text_df.empty and len(text_df.columns) > 0:
-                        st.markdown("##### 📝 Text Column Statistics")
-                        
-                        # Show value counts for first few text columns
-                        num_cols_to_show = min(3, len(text_df.columns))
-                        cols = st.columns(num_cols_to_show)
-                        
-                        for i, col in enumerate(text_df.columns[:num_cols_to_show]):
-                            with cols[i]:
-                                st.markdown(f"**{col}**")
-                                value_counts = df[col].value_counts().head(5)
-                                for val, count in value_counts.items():
-                                    st.text(f"{val}: {count}")
-                                if len(df[col].unique()) > 5:
-                                    st.text(f"... and {len(df[col].unique()) - 5} more")
-                
-                # Load to database section
-                st.markdown("### 💾 Load to Database")
-                
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    # Suggest table name based on file and sheet
-                    if sheet_name:
-                        suggested_name = suggest_table_name(f"{uploaded_file.name.split('.')[0]}_{sheet_name}")
-                    else:
-                        suggested_name = suggest_table_name(uploaded_file.name)
-                    
+                load_cols = st.columns([3, 1])
+                with load_cols[0]:
                     table_name = st.text_input(
-                        "Table name:", 
-                        value=suggested_name,
-                        help="Choose a name for this table in the database"
+                        "Table name",
+                        value=st.session_state.pending_table_name,
+                        key="table_name_input",
+                        label_visibility="collapsed",
+                        placeholder="Enter table name"
                     )
-                with col2:
-                    st.write("") # Empty space for alignment
-                    st.write("") # Empty space for alignment
-                    load_button = st.button("Load to Database", type="primary", use_container_width=True)
+                    # Update session state when user types
+                    if table_name != st.session_state.pending_table_name:
+                        st.session_state.pending_table_name = table_name
                 
-                if load_button:
-                    if table_name:
-                        with st.spinner(f"Loading data to table '{table_name}'..."):
-                            result = load_csv_to_database(df, table_name, db_path)
-                            if result:
-                                st.success(f"✅ Successfully loaded data to table '{result}'")
-                                
-                                # Store preview data
-                                st.session_state.csv_preview_data = {
-                                    'dataframe': df,
-                                    'table_name': result,
-                                    'source_file': uploaded_file.name,
-                                    'sheet_name': sheet_name
-                                }
-                                
-                                # Generate suggested questions
-                                st.markdown("### 💡 Suggested Questions")
-                                st.markdown("Click any question below to analyze it:")
-                                
-                                questions = generate_csv_questions(df, result)
-                                
-                                cols = st.columns(2)
-                                for i, q in enumerate(questions):
-                                    with cols[i % 2]:
-                                        if st.button(q, key=f"csv_q_{i}", use_container_width=True):
-                                            st.session_state.selected_question = q
-                                            st.info("Switch to the Analysis tab to run this question!")
-                    else:
-                        st.error("Please provide a table name")
+                with load_cols[1]:
+                    # Fix double-click issue by using a callback
+                    def load_data_callback():
+                        if st.session_state.pending_table_name:
+                            with st.spinner("Loading..."):
+                                result = load_csv_to_database(
+                                    df, 
+                                    st.session_state.pending_table_name, 
+                                    db_path
+                                )
+                                if result:
+                                    st.session_state.csv_preview_data = {
+                                        'dataframe': df,
+                                        'table_name': result,
+                                        'source_file': uploaded_file.name,
+                                        'sheet_name': sheet_name
+                                    }
+                                    st.session_state.load_success = True
+                                    # Clear the pending table name
+                                    if 'pending_table_name' in st.session_state:
+                                        del st.session_state.pending_table_name
+                    
+                    st.button(
+                        "💾 Load", 
+                        type="primary", 
+                        use_container_width=True,
+                        on_click=load_data_callback,
+                        disabled=not table_name
+                    )
+                
+                # Show success message after loading
+                if 'load_success' in st.session_state and st.session_state.load_success:
+                    st.success(f"✅ Table '{st.session_state.csv_preview_data['table_name']}' loaded successfully!")
+                    st.session_state.load_success = False
+                    
+                    # Quick actions after loading
+                    with st.expander("💡 Suggested questions", expanded=True):
+                        questions = generate_csv_questions(
+                            df, 
+                            st.session_state.csv_preview_data['table_name']
+                        )
+                        
+                        # Show questions in a grid layout
+                        question_cols = st.columns(2)
+                        for i, q in enumerate(questions[:6]):  # Show only first 6
+                            with question_cols[i % 2]:
+                                if st.button(
+                                    q, 
+                                    key=f"q_{i}", 
+                                    use_container_width=True,
+                                    help="Click to analyze this question"
+                                ):
+                                    st.session_state.selected_question = q
+                                    st.info("→ Go to Analysis tab")
         
-        # Show uploaded tables
-        if st.session_state.uploaded_tables:
-            st.markdown("### 📁 Uploaded Tables in This Session")
-            for i, table in enumerate(st.session_state.uploaded_tables):
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    # Show more info about the table
-                    table_info = f"**{table}**"
-                    if 'csv_preview_data' in st.session_state and st.session_state.csv_preview_data:
-                        if st.session_state.csv_preview_data.get('table_name') == table:
-                            source = st.session_state.csv_preview_data.get('source_file', 'Unknown')
-                            sheet = st.session_state.csv_preview_data.get('sheet_name')
-                            if sheet:
-                                table_info += f" (from {source} - {sheet})"
-                            else:
-                                table_info += f" (from {source})"
-                    st.info(table_info)
-                with col2:
-                    # Show row count
-                    try:
-                        conn = sqlite3.connect(db_path)
-                        cursor = conn.cursor()
-                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                        count = cursor.fetchone()[0]
-                        conn.close()
-                        st.metric("Rows", f"{count:,}")
-                    except:
-                        pass
-                with col3:
-                    if st.button("🗑️ Remove", key=f"remove_{table}"):
-                        try:
-                            conn = sqlite3.connect(db_path)
-                            conn.execute(f"DROP TABLE IF EXISTS {table}")
-                            conn.commit()
-                            conn.close()
-                            st.session_state.uploaded_tables.remove(table)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error removing table: {str(e)}")
+        # Existing tables section - removed from main interface
+        # No messages displayed here - all info moved to sidebar
     
     with tab2:
         if not st.session_state.uploaded_tables:
@@ -1271,67 +1380,6 @@ def main():
                 height=100,
                 placeholder="e.g., What are the top 10 products by revenue? Show me the trend over time."
             )
-            
-            # Advanced SQL Features Section
-            with st.expander("🚀 Advanced SQL Features", expanded=False):
-                st.markdown("""
-                **Available Advanced Features:**
-                - **JOINs**: Combine multiple tables
-                - **Window Functions**: Rankings, running totals, moving averages
-                - **CTEs**: Multi-step analysis with temporary results
-                - **Advanced Aggregations**: Subtotals, rollups, conditional sums
-                
-                **Example Questions:**
-                - "Show running total of sales by date"
-                - "Rank customers by purchase amount within each region"
-                - "Calculate 30-day moving average of orders"
-                - "Compare this month's performance to last month"
-                - "Join customer and order tables to show full picture"
-                """)
-                
-                # Show available tables for JOIN operations
-                if len(st.session_state.uploaded_tables) > 1:
-                    st.markdown("**Available tables for JOIN operations:**")
-                    for table in st.session_state.uploaded_tables:
-                        st.write(f"- {table}")
-                    
-                    # Auto-detect JOIN possibilities
-                    if st.button("🔍 Detect JOIN possibilities"):
-                        tables_info = get_table_info(db_path)
-                        if len(tables_info) >= 2:
-                            st.markdown("**Possible JOINs detected:**")
-                            # Simple detection based on column names
-                            for t1 in tables_info:
-                                for t2 in tables_info:
-                                    if t1 != t2:
-                                        common_cols = set(tables_info[t1]['columns']) & set(tables_info[t2]['columns'])
-                                        if common_cols:
-                                            st.info(f"Tables '{t1}' and '{t2}' share columns: {', '.join(common_cols)}")
-                
-                # Show query templates
-                st.markdown("**📝 Query Templates:**")
-                template_options = {
-                    "Running Total": "running_total",
-                    "Ranking": "ranking",
-                    "Moving Average": "moving_average",
-                    "Year-over-Year": "year_over_year",
-                    "Top N per Group": "top_n_per_group",
-                    "Multi-table Analysis": "multi_table_analysis"
-                }
-                
-                selected_template = st.selectbox(
-                    "Choose a template:",
-                    options=["None"] + list(template_options.keys()),
-                    help="Select a query template to see example SQL"
-                )
-                
-                if selected_template != "None":
-                    template_key = template_options[selected_template]
-                    template_code = COMPLEX_QUERY_EXAMPLES.get(template_key, "")
-                    st.code(template_code, language='sql')
-                    
-                    if st.button("Use this template", key="use_template"):
-                        st.info("💡 Adapt this template to your data by updating table and column names in your question!")
             
             col1_1, col1_2, col1_3 = st.columns([1, 1, 2])
             with col1_1:
@@ -1614,233 +1662,169 @@ def main():
         if not (st.session_state.current_analysis and st.session_state.current_analysis.get('success', False)):
             st.info("ℹ️ Run an analysis to see current query and results")
 
-# Helper functions
-def get_database_stats(db_path):
-    """Get database statistics"""
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = cursor.fetchall()
-        
-        stats = {
-            'tables': [],
-            'total_tables': len(tables),
-            'total_rows': 0
-        }
-        
-        for table in tables:
-            table_name = table[0]
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            count = cursor.fetchone()[0]
-            stats['tables'].append({'name': table_name, 'rows': count})
-            stats['total_rows'] += count
-        
-        conn.close()
-        return stats
-    except Exception as e:
-        st.error(f"Error getting database stats: {str(e)}")
-        return None
-
-def extract_sql_queries(text):
-    """Extract SQL queries from the analysis text"""
-    patterns = [
-        r"```sql\n(.*?)\n```",
-        r"```\n(SELECT.*?)\n```",
-        r"Query:\s*(SELECT.*?)(?:\n|$)",
-        r"(SELECT\s+.*?(?:;|$))",
-        r"(WITH\s+.*?SELECT\s+.*?(?:;|$))",  # Added pattern for CTEs
-    ]
-    
-    queries = []
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE | re.MULTILINE)
-        for match in matches:
-            query = match.strip()
-            if query and not any(query == q for q in queries):
-                queries.append(query)
-    
-    return queries
-
-def run_analysis(question, agents):
-    """Run analysis with provided agents"""
-    st.session_state.executed_queries = []
-    
-    try:
-        sql_specialist, data_analyst = agents
-        
-        # Create tasks
-        data_extraction = Task(
-            description=f"""
-            Extract data to answer: {question}
-            
-            IMPORTANT: 
-            1. First list ALL available tables to see what's in the database
-            2. The data comes from CSV or Excel files uploaded by the user
-            3. Available tables: {', '.join(st.session_state.uploaded_tables)}
-            4. Make sure to query the correct table that contains the data for this question
-            5. Show the exact SQL query you're executing
-            6. Use advanced SQL features when appropriate (JOINs, Window Functions, CTEs)
-            7. For complex questions, break them down using CTEs
-            """,
-            expected_output="SQL query results with the query used",
-            agent=sql_specialist
-        )
-        
-        data_analysis = Task(
-            description=f"""
-            Analyze the data for: {question}
-            
-            Provide insights based on the actual data returned from the uploaded file.
-            Look for patterns, trends, and interesting findings.
-            If the query used advanced SQL features, explain the insights they revealed.
-            """,
-            expected_output="Detailed analysis with insights",
-            agent=data_analyst
-        )
-        
-        
-        # Create and run crew
-        crew = Crew(
-            agents=[sql_specialist, data_analyst],
-            tasks=[data_extraction, data_analysis],
-            process=Process.sequential,
-            verbose=0
-        )
-        
-        result = crew.kickoff()
-        queries = extract_sql_queries(result)
-        
-        return {
-            "success": True,
-            "question": question,
-            "timestamp": datetime.now(),
-            "result": result,
-            "queries": queries
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "question": question,
-            "timestamp": datetime.now()
-        }
-
 # Sidebar
 with st.sidebar:
     st.header("🤖 CrewAI SQL Agent")
+    
+    # Show status bars (moved from main interface)
+    if not st.session_state.uploaded_tables:
+        st.info("👋 Welcome! Start by uploading a CSV or Excel file in the 'Data Upload' tab.")
+    else:
+        st.success(f"✅ Ready to analyze {len(st.session_state.uploaded_tables)} table(s)")
+    
+    # Show validation messages in sidebar (if any file is being processed)
+    if 'current_validation' in st.session_state and st.session_state.current_validation:
+        validation = st.session_state.current_validation
+        st.divider()
+        st.subheader("📋 File Validation")
+        
+        if validation.get('info'):
+            for info in validation['info']:
+                st.info(f"ℹ️ {info}")
+        
+        if validation.get('warnings'):
+            for warning in validation['warnings']:
+                st.warning(f"⚠️ {warning}")
+    
+    # Show file upload status and details
+    if 'current_file_info' in st.session_state and st.session_state.current_file_info:
+        file_info = st.session_state.current_file_info
+        st.divider()
+        st.subheader("📄 Current File")
+        
+        # File details
+        st.markdown(f"**Name:** {file_info['name']}")
+        st.markdown(f"**Size:** {file_info['size']}")
+        st.markdown(f"**Type:** {file_info['type']}")
+        
+        # Data info if loaded
+        if file_info.get('df_info'):
+            df_info = file_info['df_info']
+            st.divider()
+            st.subheader("📊 Data Overview")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Rows", f"{df_info['rows']:,}")
+                st.metric("Numeric", df_info['numeric_cols'])
+            with col2:
+                st.metric("Columns", df_info['columns'])
+                st.metric("Missing", f"{df_info['missing_pct']:.1f}%")
+            
+            # Column type info
+            if df_info['numeric_cols'] == 0:
+                st.info("💡 All columns are text")
+            elif df_info['text_cols'] == df_info['columns']:
+                st.info("💡 No numeric columns")
+            else:
+                st.success(f"✓ {df_info['numeric_cols']} numeric, {df_info['text_cols']} text")
     
     st.divider()
     
     # Session info
     st.subheader("📊 Session Info")
-    st.info(f"Session: {st.session_state.session_id}")
+    st.caption(f"ID: {st.session_state.session_id}")
     
-    # Clear all data button
-    if st.button("🗑️ Clear All Data", use_container_width=True):
-        try:
-            # Get fresh connection
-            db, db_path = get_database_connection()
-            if db_path:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                
-                # Get all tables
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                tables = cursor.fetchall()
-                
-                # Drop each table
-                for table in tables:
-                    cursor.execute(f"DROP TABLE IF EXISTS {table[0]}")
-                
-                conn.commit()
-                conn.close()
-            
-            # Clear session state
-            st.session_state.uploaded_tables = []
-            st.session_state.csv_preview_data = None
-            st.session_state.current_analysis = None
-            st.session_state.query_results = None
-            st.session_state.query_history = []
-            st.success("✅ All data cleared!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error clearing data: {str(e)}")
-    
-    st.divider()
-    
-    # Show uploaded tables
+    # Uploaded tables
     if st.session_state.uploaded_tables:
-        st.subheader("📁 Uploaded Tables")
-        for table in st.session_state.uploaded_tables[-5:]:
-            st.success(f"📊 {table}")
-        if len(st.session_state.uploaded_tables) > 5:
-            st.info(f"...and {len(st.session_state.uploaded_tables) - 5} more")
+        st.divider()
+        st.subheader("📁 Loaded Tables")
+        
+        # Get database connection for stats
+        db, db_path = get_database_connection()
+        
+        for table in st.session_state.uploaded_tables:
+            # Create a container for each table
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    # Get row count
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = cursor.fetchone()[0]
+                        conn.close()
+                        st.success(f"**{table}**  \n{count:,} rows")
+                    except:
+                        st.success(f"**{table}**")
+                
+                with col2:
+                    if st.button("🗑️", key=f"del_{table}", help=f"Remove {table}"):
+                        try:
+                            conn = sqlite3.connect(db_path)
+                            conn.execute(f"DROP TABLE IF EXISTS {table}")
+                            conn.commit()
+                            conn.close()
+                            st.session_state.uploaded_tables.remove(table)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+        
+        # Clear all data button
+        if st.button("🗑️ Clear All Data", use_container_width=True):
+            try:
+                # Get fresh connection
+                db, db_path = get_database_connection()
+                if db_path:
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+                    
+                    # Get all tables
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = cursor.fetchall()
+                    
+                    # Drop each table
+                    for table in tables:
+                        cursor.execute(f"DROP TABLE IF EXISTS {table[0]}")
+                    
+                    conn.commit()
+                    conn.close()
+                
+                # Clear session state
+                st.session_state.uploaded_tables = []
+                st.session_state.csv_preview_data = None
+                st.session_state.current_analysis = None
+                st.session_state.query_results = None
+                st.session_state.query_history = []
+                st.session_state.current_validation = None
+                st.session_state.current_file_info = None
+                st.success("✅ All data cleared!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
     else:
-        st.info("📭 No tables uploaded yet")
-    
-    st.divider()
-    
-    # SQL Features
-    st.subheader("🚀 SQL Features")
-    st.markdown("""
-    **Supported Operations:**
-    - ✅ Basic queries
-    - ✅ JOINs (all types)
-    - ✅ Window functions
-    - ✅ CTEs
-    - ✅ Advanced aggregations
-    - ✅ Date/time operations
-    """)
+        st.info("📭 No tables loaded yet")
     
     st.divider()
     
     # Help section
     with st.expander("❓ Help", expanded=False):
         st.markdown("""
-        **How to use:**
-        
-        1. **Upload File**: Go to Data Upload tab
-        2. **Choose Format**: CSV or Excel files supported
-        3. **Select Sheet**: For Excel files with multiple sheets
-        4. **Preview**: Check your data before loading
-        5. **Load**: Give your table a meaningful name
-        6. **Ask Questions**: Use suggested questions or write your own
-        7. **View Results**: Check the Query & Results tab
-        
-        **Advanced SQL Tips:**
-        - Use "running total" for cumulative calculations
-        - Use "rank by" for ordering within groups
-        - Use "join" to combine multiple tables
-        - Use "moving average" for trend analysis
-        - Use "compare" for period-over-period analysis
+        **Quick Start:**
+        1. Upload CSV/Excel file
+        2. Load to database
+        3. Ask questions
+        4. View results
         
         **Tips:**
-        - Supports CSV and Excel (XLS, XLSX) files
-        - Empty files are automatically rejected
-        - Column names are cleaned automatically
-        - All data is temporary (session-based)
-        - Use descriptive table names
-        - Try the suggested questions first
-        - You can upload multiple files
+        - Supports CSV, XLS, XLSX
+        - Clean column names automatically
+        - Multiple files supported
+        - All data is temporary
         
-        **Common Questions:**
-        - Show trends over time
-        - Find top/bottom performers
-        - Calculate averages and totals
+        **Sample Questions:**
+        - Show all data
+        - Count records
+        - Find top values
+        - Calculate averages
         - Group by categories
-        - Compare different segments
-        - Rank within groups
-        - Calculate running totals
-        - Join multiple tables
         """)
     
     st.divider()
     
     # Footer
-    st.caption("Made with ❤️ using Streamlit & CrewAI")
+    st.caption("Made with ❤️ using  \nStreamlit & CrewAI")
 
 # Clean up temporary database on app close
 import atexit
