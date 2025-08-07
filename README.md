@@ -7,7 +7,6 @@ An AI-powered SQL agent system that enables natural language database queries us
 - **Natural Language to SQL**: Ask questions in plain English, get SQL queries automatically
 - **CSV Upload & Analysis**: Upload CSV files directly through the web interface
 - **Intelligent Query Generation**: AI agents write optimized SQL queries
-- **Business Insights**: Get data analysis and strategic recommendations
 - **Query History**: Track all queries with deduplication and export options
 - **Interactive Results**: View query results in tables with export to CSV
 - **Multi-Agent System**: Specialized agents for SQL, analysis, and business strategy
@@ -64,24 +63,29 @@ streamlit run main.py
 2. **Open your browser**
 Navigate to `http://localhost:8501`
 
-3. **Upload your data**
+3. **Run on Hugging Face**
+Try it live: [CrewAI SQL Agent](https://huggingface.co/spaces/gLiTcH9724/CrewAI-SQL-Agent)
+Or deploy your own:
+
+- Go to Hugging Face Spaces
+- Create new Space → Choose Streamlit
+- Upload the app.py file
+- Add your API key in Settings → Repository secrets as GROQ_API_KEY
+
+4. **Upload your data**
 - Go to the "CSV Upload" tab
 - Upload one or more CSV files
 - Preview the data and load it into the database
 
-4. **Ask questions**
+5. **Ask questions**
 - Switch to the "Analysis" tab
 - Type your question in natural language
 - Examples:
-  - "What is the average salary by department?"
-  - "Show me the top 10 customers by revenue."
-  - "What are the monthly sales trends?"
 
-5. **View results**
+6. **View results**
 - See the generated SQL query
 - View results in a table format
 - Download results as CSV
-- Read AI-generated analysis and recommendations
 
 ## Project Structure
 
@@ -94,7 +98,6 @@ CrewAI-SQL-Agent/
 ├── .env.example             # Environment variables template
 ├── README.md                # This file
 ├── .gitignore              # Git ignore configuration
-└── setup_database.py        # (Optional) Pre-populate database with sample data
 ```
 
 ## Configuration
@@ -113,16 +116,13 @@ The system uses LLaMA 3 70B by default.
 1. **Multi-Agent Architecture**
    - **SQL Specialist**: Converts natural language to SQL queries
    - **Data Analyst**: Analyzes query results and finds patterns
-   - **Business Consultant**: Provides strategic recommendations
 
 2. **Workflow**
-   - Upload CSV → Ask question → SQL generation → Query execution → Analysis → Business insights
+   - Upload CSV → Ask question → SQL generation → Query execution
 
 3. **Query Processing**
-   - Questions are processed by specialized AI agents
+   - Specialized AI agents process questions
    - SQL queries are validated before execution
-   - Results are analyzed for patterns and insights
-   - Business recommendations are generated
 
 ## Troubleshooting
 
@@ -148,7 +148,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature')
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
@@ -161,6 +161,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [CrewAI](https://github.com/joaomdmoura/crewAI) for the multi-agent framework
 - [LangChain](https://github.com/langchain-ai/langchain) for LLM tooling
 - [Streamlit](https://streamlit.io/) for the web interface
+- [HuggingFace](https://huggingface.co/spaces) for hosting the application
 - [Groq](https://groq.com/) for LLaMA 3 API access
 
 ## Contact
