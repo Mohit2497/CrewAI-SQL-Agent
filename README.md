@@ -12,6 +12,9 @@ An AI-powered SQL agent system that enables natural language database queries us
 - **Interactive Results**: View query results in tables with export to CSV
 - **Multi-Agent System**: Specialized agents for SQL, analysis, and business strategy
 
+<img width="752" height="532" alt="image" src="https://github.com/user-attachments/assets/f623a040-75e9-466f-aa6b-e6badd828ac8" />
+
+
 ## Prerequisites
 
 - Python 3.8 or higher
